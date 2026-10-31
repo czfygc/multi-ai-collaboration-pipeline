@@ -27,13 +27,11 @@ jobs:
       - name: Skill quality gate (T-155)
         run: node orchestrator/skill-quality.mjs --strict
 
-      - name: verify-gate
-        run: node orchestrator/verify-gate.mjs
-
-      - name: Gate tests
-        # T-164 实测：Node 24 上 `node --test orchestrator/test/`（目录参数）会退化成
-        # 「把目录当模块加载」→ MODULE_NOT_FOUND；改用 glob 形式（Node 20/22/24 通用）。
-        run: node --test "orchestrator/test/*.test.mjs"
+      # T-250：verify-gate 与 Gate tests 已移出公开 CI。二者是「完整工作区闸」——
+      # 依赖未发布的全仓闭包（lib/exec-*、shell/titan-shell、js-yaml node_modules、
+      # tmp 夹具、docs 图等）与 WIP 文件（web-seat），在发布树子集上必挂（2026-10-31
+      # 干净克隆实测 22/328 失败）。其职责由本地 pre-commit 钩子（T-204 已装）+ 四端
+      # M4 自检承担；公开面由上方 registry 守卫、skill-quality、交付闸、gitleaks 把关。
 
       - name: Delivery gates (T-175)
         # 交付闸：第三方署名必须 PASS（显式未知不当通过）；产物/发布段在仓库本体上未判 = UNKNOWN
