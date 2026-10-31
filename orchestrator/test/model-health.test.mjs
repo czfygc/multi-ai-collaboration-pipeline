@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import {
   loadTiers, listModels, getModel, getTaskTier, probeModel, probeModels, evaluateHealth,
   recommend, renderHealthTable, renderRecommendation, readCache, cacheEntry, TIERS, DEFAULT_TTL_MS,
+  probeContext, buildCtxFiller,
 } from '../lib/model-health.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
@@ -133,10 +134,10 @@ test('TTL 缓存：第二次跑不重复探（probed 为空、entries 复用）'
       const body = JSON.parse(init.body);
       return { status: 200, text: async () => JSON.stringify({ choices: [{ message: { tool_calls: [{ function: { name: 'ping' } }] } }] }) };
     };
-    const first = await probeModels({ ids: ['a', 'b'], config: cfg, cachePath, fetchImpl, env: { FREELLMAPI_API_KEY: 'k' } });
+    const first = await probeModels({ ids: ['a', 'b'], config: cfg, cachePath, fetchImpl, env: { FREELLMAPI_API_KEY: 'k' }, ctxProbe: false });
     assert.equal(first.probed.length, 2);
     assert.equal(calls, 2);
-    const second = await probeModels({ ids: ['a', 'b'], config: cfg, cachePath, fetchImpl, env: { FREELLMAPI_API_KEY: 'k' } });
+    const second = await probeModels({ ids: ['a', 'b'], config: cfg, cachePath, fetchImpl, env: { FREELLMAPI_API_KEY: 'k' }, ctxProbe: false });
     assert.equal(second.probed.length, 0);
     assert.equal(second.cached.length, 2);
     assert.equal(calls, 2, 'TTL 内不该再探');
@@ -219,4 +220,95 @@ test('CLI：--no-probe --json 可离线运行；未知任务档位退 2', () => 
   assert.ok(Array.isArray(j.health));
   const bad = spawnSync(process.execPath, [CLI, '--task', 'nope'], { cwd: REPO_ROOT, encoding: 'utf8' });
   assert.equal(bad.status, 2);
+});
+
+// ── T-251 大上下文实战探针（T-248 §7.5：小探针 200 ≠ 实战可用）────────────────
+
+test('ctx 填充：确定性、长度达标、含可 grep 标记', () => {
+  const a = buildCtxFiller(24000);
+  assert.ok(a.length >= 24000, '应至少 minChars');
+  assert.ok(a.startsWith('REF-00000:'), '行首格式');
+  assert.ok(a.includes('TITAN-'), '含 codeword');
+  assert.equal(a, buildCtxFiller(24000), '确定性：两次生成一致');
+});
+
+test('ctx 探针：200 + [DONE] + tool_calls → ok（firsthand 依据）', async () => {
+  const r = await probeContext({
+    id: 'cx1', baseUrl: 'http://x/v1', env: { FREELLMAPI_API_KEY: 'k' },
+    fetchImpl: async () => ({ status: 200, text: async () => 'data: {"choices":[{"delta":{"tool_calls":[{"function":{"name":"ping"}}]}}]}\n\ndata: [DONE]\n\n' }),
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.reason, 'ctx_ok');
+});
+
+test('ctx 探针：流断（无 [DONE]）→ ok:false stream_incomplete（正是小探针测不到的病）', async () => {
+  const r = await probeContext({
+    id: 'cx2', baseUrl: 'http://x/v1', env: { FREELLMAPI_API_KEY: 'k' },
+    fetchImpl: async () => ({ status: 200, text: async () => 'data: {"choices":[{"delta":{"content":"partial…"}}]}\n\n' }),
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'stream_incomplete');
+});
+
+test('ctx 探针：超时/断连 → ok:false（ctx_timeout / error），不是 unknown', async () => {
+  const t = await probeContext({ id: 'cx3', baseUrl: 'http://x/v1', env: { FREELLMAPI_API_KEY: 'k' },
+    fetchImpl: async () => { const e = new Error('aborted'); e.name = 'AbortError'; throw e; } });
+  assert.equal(t.ok, false); assert.equal(t.reason, 'ctx_timeout');
+  const n = await probeContext({ id: 'cx4', baseUrl: 'http://x/v1', env: { FREELLMAPI_API_KEY: 'k' },
+    fetchImpl: async () => { throw new Error('socket hang up'); } });
+  assert.equal(n.ok, false); assert.match(n.reason, /socket hang up/);
+});
+
+test('probeModels ctx 集成：白名单平台小探针过后加大探；断流 → fidelity=refuted；非白名单 → referenced', async () => {
+  const dir = tmpDir();
+  try {
+    const cachePath = join(dir, 'h.json');
+    const cfg = {
+      gateway: { baseUrl: 'http://x/v1', keyEnv: 'K', ctxProbe: { enabled: true, minChars: 100, timeoutMs: 5000, platforms: ['radeon'] } },
+      models: [
+        { id: 'rad', tier: 'medium', platform: 'radeon', rpd: null },
+        { id: 'kilo', tier: 'medium', platform: 'kilo', rpd: null },
+      ],
+    };
+    let ctxCalls = 0;
+    const fetchImpl = async (url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.stream === true) {
+        ctxCalls += 1;
+        // radeon 大上下文断流（无 [DONE]）；kilo 不该被探
+        return { status: 200, text: async () => body.model === 'rad' ? 'data: {"partial":1}\n\n' : 'data: {"choices":[{"delta":{"tool_calls":[{"function":{"name":"ping"}}]}}]}\n\ndata: [DONE]\n\n' };
+      }
+      return { status: 200, text: async () => JSON.stringify({ choices: [{ message: { tool_calls: [{ function: { name: 'ping' } }] } }] }) };
+    };
+    const res = await probeModels({ ids: ['rad', 'kilo'], config: cfg, cachePath, fetchImpl, env: { K: 'k' } });
+    assert.equal(ctxCalls, 1, '只有白名单平台被加大探');
+    assert.equal(res.entries.rad.fidelity, 'refuted', '小探针 healthy 但实战断流 → refuted');
+    assert.equal(res.entries.rad.state, 'healthy'); // 小探针对：不断言 down——断流由 fidelity 承载
+    assert.equal(res.entries.kilo.fidelity, 'referenced', '非白名单只到引用级');
+    assert.ok(!('ctx' in res.entries.kilo));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('分级裁决：needsContext 档位排除 fidelity=refuted 的模型（REFERENCED 不许冒充 VERIFIED）；非 needsContext 不受影响', () => {
+  const cfg = loadTiers(CONFIG);
+  assert.equal(cfg.taskTiers.architecture.needsContext, true);
+  assert.equal(cfg.taskTiers.mechanical.needsContext === undefined, true);
+  const victim = cfg.models.find((m) => m.tier === 'heavy' && m.free !== false && m.tools !== false);
+  const health = {};
+  for (const m of cfg.models) health[m.id] = { id: m.id, state: 'healthy', tools: true, latency_ms: 100, checked_at: Date.now() };
+  health[victim.id] = { ...health[victim.id], fidelity: 'refuted', ctx: { ok: false, reason: 'stream_incomplete' } };
+  const rec = recommend({ config: cfg, health, taskTier: 'architecture', limit: 100 });
+  assert.ok(!rec.candidates.some((c) => c.id === victim.id), 'needsContext 档位必须排除实战断流被证的模型');
+  const rec2 = recommend({ config: cfg, health, taskTier: 'mechanical', requireTools: false, limit: 100 });
+  assert.ok(rec2.candidates.some((c) => c.id === victim.id), '机械活不要求大上下文，仍可派');
+});
+
+test('ctxProbe 配置卫生：白名单只含不限量平台；needsContext 档位齐全（architecture/review/long_run）', () => {
+  const cfg = loadTiers(CONFIG);
+  const cp = cfg.gateway.ctxProbe;
+  assert.ok(cp && cp.enabled === true, 'ctxProbe 应启用');
+  assert.equal(cp.unlimitedOnly, true, '计量档永不被 ctx 探针烧额度（SOP 踩坑B）');
+  const radeonOnly = cp.platforms.every((p) => cfg.models.some((m) => m.platform === p && (m.rpd === null || m.rpd === undefined)));
+  assert.ok(radeonOnly, 'platforms 白名单里不许出现计量平台');
+  for (const t of ['architecture', 'review', 'long_run']) assert.equal(cfg.taskTiers[t].needsContext, true, t + ' 应 needsContext');
 });

@@ -45,6 +45,8 @@ if (argv.includes('--help') || argv.includes('-h') || (!taskTier && !modelId && 
     '  --ttl <ms>       健康 TTL（默认 600000）',
     '  --refresh        忽略缓存，重新探',
     '  --no-probe       不探针（只用缓存/离线视图）',
+    '  --no-ctx         关大上下文探针（T-251：默认按 gateway.ctxProbe 只探白名单平台）',
+    '  --ctx-probe      无视平台白名单强开上下文探针（调试用，耗被探平台额度）',
     '  --allow-paid     允许付费模型进候选（默认只给免费档）',
     '  --json           输出 JSON',
     '退出码: 0=OK 1=无健康候选 2=用法错误 3=UNKNOWN（网关不可达/缺 key）',
@@ -58,6 +60,15 @@ try {
 } catch (e) {
   console.error('[MODEL-HEALTH] 分档表加载失败: ' + e.message);
   process.exit(2);
+}
+
+// T-251：CLI 手动探针也从 titan_secrets.env 装 key（含 T-236 同类键名别名）
+{
+  const { loadSecretsEnv } = await import('./lib/alert.mjs');
+  loadSecretsEnv({ repoRoot: REPO_ROOT, env: process.env, only: ['FREELLMAPI_API_KEY', 'TITAN_FREELLM_API_KEY'] });
+  if (!process.env.FREELLMAPI_API_KEY && process.env.TITAN_FREELLM_API_KEY) {
+    process.env.FREELLMAPI_API_KEY = process.env.TITAN_FREELLM_API_KEY;
+  }
 }
 
 let ids = [];
@@ -78,8 +89,10 @@ if (modelId) {
 // 探针（可跳过：离线只读缓存）
 let entries = {};
 let probed = [];
+// T-251：--no-ctx 强关大上下文探针；--ctx-probe 无视平台白名单强开（调试用，耗被探平台额度）
+const ctxOverride = argv.includes('--no-ctx') ? false : (argv.includes('--ctx-probe') ? true : null);
 if (!noProbe) {
-  const res = await probeModels({ ids, config, ttlMs, refresh, cachePath });
+  const res = await probeModels({ ids, config, ttlMs, refresh, cachePath, ctxProbe: ctxOverride });
   entries = res.entries;
   probed = res.probed;
 } else {

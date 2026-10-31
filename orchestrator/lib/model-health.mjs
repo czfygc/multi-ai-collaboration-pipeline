@@ -138,10 +138,85 @@ export async function probeModel({
   }
 }
 
+// ── T-251 大上下文实战探针（T-248 §7.5 活例：小探针 200 ≠ 大上下文不断流）────
+// 反幻觉映射：小探针通过 = REFERENCED（引用级证据）；大上下文流式完成 = VERIFIED(firsthand)；
+// 大上下文断流 = 小探针证据被 REFUTED，"healthy" 徽章作废（recommend 对 needsContext 档位直接排除）。
+// 成本红线（SOP 踩坑 B：OpenRouter 50/天账号级）：默认只给不限量平台（rpd=null）加探；
+// 计量档保持旧口径 REFERENCED。配置 gateway.ctxProbe: {enabled, minChars, timeoutMs, unlimitedOnly}。
+export const PING_TOOL = Object.freeze({
+  type: 'function', function: { name: 'ping', description: 'p', parameters: { type: 'object', properties: { n: { type: 'integer' } } } },
+});
+
+/** 确定性填充文本（≥minChars），行形如 REF-00042: ... TITAN-xxxxx（可 grep 防缓存假命中）。 */
+export function buildCtxFiller(minChars = 24000) {
+  let s = '';
+  let i = 0;
+  while (s.length < minChars && i < 100000) {
+    s += 'REF-' + String(i).padStart(5, '0') + ': the codeword for slot ' + i + ' is TITAN-' + String((i * 7919) % 100000).padStart(5, '0') + '.\n';
+    i += 1;
+  }
+  return s;
+}
+
+/**
+ * 大上下文流式探针：~minChars 字符 + stream:true，判"首包到 [DONE] 全程不断"。
+ * 断流（无 [DONE]）/ 超时 / 无 tool_calls → ok:false（down 语义：徽章作废）。
+ * 网关中途断流不可换链（SOP 踩坑 J），所以只能实测。
+ */
+export async function probeContext({
+  id, baseUrl, keyEnv = 'FREELLMAPI_API_KEY', timeoutMs = 90000, minChars = 24000, fetchImpl = null, env = null,
+} = {}) {
+  const apiKey = (env || process.env)[keyEnv];
+  if (!apiKey) {
+    return { id, ok: false, ctx: true, reason: 'missing_key:' + keyEnv, latency_ms: null, checked_at: Date.now() };
+  }
+  const doFetch = fetchImpl || fetch;
+  const url = baseUrl.replace(/\/+$/, '') + '/chat/completions';
+  const started = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await doFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', Authorization: 'Bearer ' + apiKey },
+      body: JSON.stringify({
+        model: id,
+        stream: true,
+        max_tokens: 2048,
+        tools: [PING_TOOL],
+        messages: [{ role: 'user', content: buildCtxFiller(minChars) + '\nAfter the reference lines above, call ping({n:1}).' }],
+      }),
+      signal: controller.signal,
+    });
+    const latency = Date.now() - started;
+    const text = await res.text();
+    if (res.status !== 200) {
+      return { id, ok: false, ctx: true, reason: 'http_' + res.status, http_status: res.status, latency_ms: latency, checked_at: Date.now(), body_head: text.slice(0, 200) };
+    }
+    const done = text.includes('[DONE]');
+    const hasTool = /"tool_calls"/.test(text);
+    if (!done) {
+      return { id, ok: false, ctx: true, reason: 'stream_incomplete', http_status: 200, latency_ms: latency, checked_at: Date.now(), body_head: text.slice(-120) };
+    }
+    if (!hasTool) {
+      return { id, ok: false, ctx: true, reason: 'ctx_no_tool_calls', http_status: 200, latency_ms: latency, checked_at: Date.now() };
+    }
+    return { id, ok: true, ctx: true, reason: 'ctx_ok', http_status: 200, latency_ms: latency, checked_at: Date.now() };
+  } catch (e) {
+    const latency = Date.now() - started;
+    const aborted = e && (e.name === 'AbortError' || /abort/i.test(String(e.message || '')));
+    return { id, ok: false, ctx: true, reason: aborted ? 'ctx_timeout' : ('error:' + String((e && e.message) || e).slice(0, 120)), latency_ms: latency, checked_at: Date.now() };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // 批量探针（带 TTL 缓存复用）；返回 { entries, probed, cached }
+// T-251：小探针通过后，按 gateway.ctxProbe 给不限量平台追加上下文探针，
+// entry 上带 fidelity（firsthand|refuted|referenced）+ ctx 子对象。ctxProbe: null=按配置, false=强关, true=强开。
 export async function probeModels({
   ids, config = loadTiers(), ttlMs = DEFAULT_TTL_MS, refresh = false, cachePath = DEFAULT_CACHE_PATH,
-  fetchImpl = null, env = null, concurrency = 3, now = Date.now(),
+  fetchImpl = null, env = null, concurrency = 3, now = Date.now(), ctxProbe = null,
 } = {}) {
   const cache = readCache(cachePath);
   const entries = {};
@@ -152,11 +227,34 @@ export async function probeModels({
     toProbe.push(id);
   }
   const gw = config.gateway || {};
+  const ctxCfg = Object.assign(
+    { enabled: false, minChars: 24000, timeoutMs: 90000, unlimitedOnly: true },
+    gw.ctxProbe || {},
+  );
+  if (ctxProbe === false) { ctxCfg.enabled = false; }
+  if (ctxProbe === true) { ctxCfg.enabled = true; ctxCfg.platforms = null; }  // --ctx-probe：调试强开，无视白名单
+  const byId = new Map((config.models || []).map((m) => [m.id, m]));
   for (let i = 0; i < toProbe.length; i += concurrency) {
     const batch = toProbe.slice(i, i + concurrency);
-    const results = await Promise.all(batch.map((id) => probeModel({
-      id, baseUrl: gw.baseUrl, keyEnv: gw.keyEnv, timeoutMs: gw.probeTimeoutMs, fetchImpl, env,
-    })));
+    const results = await Promise.all(batch.map(async (id) => {
+      const r = await probeModel({ id, baseUrl: gw.baseUrl, keyEnv: gw.keyEnv, timeoutMs: gw.probeTimeoutMs, fetchImpl, env });
+      if (!r.ok || !ctxCfg.enabled) {
+        if (r.ok) r.fidelity = 'referenced';   // 小探针通过但按口径不加探 → 引用级
+        return r;
+      }
+      const m = byId.get(id);
+      const unlimited = m === undefined || m === null || m.rpd === null || m.rpd === undefined;
+      if (ctxCfg.unlimitedOnly && !unlimited) { r.fidelity = 'referenced'; return r; }
+      // platforms 白名单（探测纪律：弱通道/计量渠道不加探，只给已实证断流的平台加探）；null=全平台
+      if (Array.isArray(ctxCfg.platforms) && ctxCfg.platforms.length && !ctxCfg.platforms.includes(m && m.platform)) { r.fidelity = 'referenced'; return r; }
+      const ctx = await probeContext({
+        id, baseUrl: gw.baseUrl, keyEnv: gw.keyEnv, timeoutMs: ctxCfg.timeoutMs, minChars: ctxCfg.minChars, fetchImpl, env,
+      });
+      r.ctx = ctx;
+      r.ctx_checked_at = ctx.checked_at;
+      r.fidelity = ctx.ok ? 'firsthand' : 'refuted';
+      return r;
+    }));
     for (const r of results) {
       entries[r.id] = r;
       cache[r.id] = r;
@@ -203,6 +301,9 @@ export function recommend({
     if (state === 'down') continue;
     if (m.tools === false) continue;                       // 分档表登记就不支持工具 → 直接排除
     if (needTools && h && h.tools === false) continue;     // 实测探针没出 tool_calls → 不派需要工具的活
+    // T-251 分级裁决：实战断流被证的模型，大上下文档位（policy.needsContext）直接排除——
+    // 小探针 healthy 救不回来（REFERENCED 被 REFUTED，不许冒充 VERIFIED）。
+    if (policy.needsContext === true && h && h.fidelity === 'refuted') continue;
     if (taskKind && Array.isArray(m.taskKinds) && m.taskKinds.length && !m.taskKinds.includes(taskKind)) continue;
     const quotaRank = m.rpd === null || m.rpd === undefined ? 0 : (m.rpd <= 200 ? 1 : 2);
     rows.push({
@@ -250,7 +351,8 @@ export function renderHealthTable(entries, models, { ttlMs = DEFAULT_TTL_MS, now
       (m.rpd === null || m.rpd === undefined ? 'unlimited' : 'rpd=' + m.rpd).padEnd(11),
       state.padEnd(8),
       (e.latency_ms === null || e.latency_ms === undefined ? '-' : e.latency_ms + 'ms').padEnd(9),
-      e.tools ? 'tools=Y' : 'tools=N',
+      (e.tools ? 'tools=Y' : 'tools=N').padEnd(8),
+      (e.fidelity || 'ref*'),  // T-251: firsthand=实战过 ctx / refuted=ctx断流 / ref*=只有引用级小探针
       e.reason || '',
     ].join(' '));
   }
@@ -280,6 +382,6 @@ export function renderRecommendation(rec) {
 
 export default {
   DEFAULT_CONFIG_PATH, DEFAULT_CACHE_PATH, DEFAULT_TTL_MS, TIERS, HEALTH_STATES,
-  loadTiers, listModels, getModel, getTaskTier, probeModel, probeModels,
+  loadTiers, listModels, getModel, getTaskTier, probeModel, probeModels, probeContext, buildCtxFiller, PING_TOOL,
   evaluateHealth, recommend, renderHealthTable, renderRecommendation, readCache, writeCache, cacheEntry,
 };
