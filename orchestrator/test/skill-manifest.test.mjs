@@ -185,7 +185,9 @@ test('verify：一致则 ok；技能内容变了则报不一致', () => {
 test('仓内真实技能：manifest 覆盖全部技能且与磁盘一致', () => {
   const m = readManifest(DEFAULT_MANIFEST_PATH);
   assert.ok(m, '仓内 manifest 不存在（先跑 node orchestrator/skill-manifest.mjs apply）');
-  assert.ok(m.skills.length >= 20, '技能数异常: ' + m.skills.length);
+  // T-183（2026-10-22 技能整合）：21 → 15（同族合并 + 删纯别名），下限随之下调；
+  // 仍保留护栏：低于 15 说明技能被误删，要查。
+  assert.ok(m.skills.length >= 15, '技能数异常: ' + m.skills.length);
   const v = verifyManifest({ manifestPath: DEFAULT_MANIFEST_PATH, skillsRoot: DEFAULT_SKILLS_ROOT });
   assert.equal(v.ok, true, JSON.stringify(v.issues));
 });

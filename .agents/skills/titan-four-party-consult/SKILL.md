@@ -1,11 +1,11 @@
 ---
 name: titan-four-party-consult
-description: "Use when the user says '4 会诊' / '四方会诊' / 'four-party consult' / 'multi-review dispatch' / 'cross-model review', or when a TITAN artifact (report, code, spec, decision) needs independent cross-model review. Dispatches to three independent reviewers (Gemini / DeepSeek / Qwen) via CDP, preserves raw findings losslessly (Layer A), detects conflicts and blind spots, produces architect-grade decision input (Layer B / delta.md), which is then consumed by ChatGPT as the fourth party (Research Architect). Protocol-driven; reviewers and perspectives configurable via reviewers.yaml."
+description: "【评审复核】4 会诊 / 多方独立复核：两种模式——①管道模式（Gemini/DeepSeek/Qwen 走 CDP 审 artifact + ChatGPT 做 Architect）②复杂问题 4 席同题交叉审问（deepseek/qwen/gemini/chatgpt 四网页席一次全问）。无损保留原始发现、检测冲突与盲区，产出决策输入（作者用完汇总）。触发词：4 会诊 / 四方会诊 / 交叉审问 / cross-examine / multi-review / cross-model review / 复杂问题问四家"
 user-invocable: true
 model-invocable: true
-version: 1.0.0
+version: 1.1.0
 requires: cdp-browser-9222, reviewers.yaml
-tests: manual: 对一份 fixture 报告跑四席会诊并检查 delta.md
+tests: "manual: 对一份 fixture 报告跑四席会诊并检查 delta.md"
 provenance: original
 ---
 
@@ -45,6 +45,36 @@ provenance: original
 ChatGPT is NOT a reviewer. It is the fourth party (Research Architect) that consumes delta.md and produces architect-decision.md for Director.
 
 > 席位名单唯一事实源 = `orchestrator/reviewers.yaml`（enabled:true 生效）。2026-10-12 T-57 起现役 = **gemini / deepseek / qwen**（grok `enabled:false` 备胎，导航超时+强模型收费已换座）。本技能内任何具体席位名仅作示例，派单前以 yaml 为准。
+
+## Mode 2：复杂问题 4 席同题交叉审问（2026-10-22 用户裁定 · 8 个月失败开发总结）
+
+> 用户原话："chat.deepseek.com，chat.qwen.ai，gemini.google.com，chatgpt.com，
+> 复杂的问题你直接把他们4个一起交叉审问 能解决99.9%的问题——这是我经过8个月开发失败后总结的经验。"
+> 落盘：共享记忆 fact `76c69332`（decision）。
+
+**与 Mode 1（管道模式）的区别**：管道模式审的是**一份 artifact**（layer-a/b/delta 结构化流水）；
+Mode 2 审的是**一个问题**（方案/难 bug/架构决策/收口复核），四席同题直问，不经 pipeline 层。
+两者可叠用：先 Mode 2 定方向，再 Mode 1 做 artifact 级裁决。
+
+**四席固定（缺一即不成立）：**
+
+| 席 | 入口 | 本席价值 |
+|---|---|---|
+| chat.deepseek.com | 网页 | 正确性与实现细节（逐行抓真 bug） |
+| chat.qwen.ai | 网页 | 对抗性与失效模式 |
+| gemini.google.com | 网页 | 架构与接口契约 |
+| chatgpt.com | 网页 | 架构视角 + **跨会话记忆**（复核落点；同题可复用历史上下文） |
+
+**执行红线（违反即判复核未完成）：**
+
+1. **同题同料**：四席发**同一份**问题单（同一 brief 文件、同一证据摘录），不许给某席"更多背景"——否则发现不可比，冲突检测失效。
+2. **一次四席并行**：不许"先问一家看结论再决定要不要问别家"；也不许只问 1~2 席就下"复核通过"结论。
+3. **无损保留**：各席原始回复整段落盘到 `archive/evidence/<T-xx>/web/<seat>.md`，去重分析是**第二步**，第一步永不改写原文。
+4. **单席失败必须补位**：某席上传失败/挑战页/超时 → 补位重发，缺口显式标注；**单席结论 ≠ 复核完成**（本轮 T-168 实证：DeepSeek 抓 3 条、ChatGPT 抓 5 条 P1，互为盲区）。
+5. **发现逐条核验后才算数**：每条发现先本地核验真假再改代码（假发现照样浪费一轮），核验结论回写证据文件。
+6. ChatGPT 席可调**两次不同角色**（咨询席 + 架构席，见 `reviewers.yaml` 的 `role: consultant` 与 `architect:`），保留该机制。
+
+**完成判据**：四席齐 + 无损归档 + 逐条核验（真→修+回归、假→注明）+ 冲突/盲区汇总一份。
 
 ## Scope
 

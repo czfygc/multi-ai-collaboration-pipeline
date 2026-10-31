@@ -714,6 +714,116 @@
         "design"
       ],
       "note": "付费档，仅在用户授权付费时用"
+    },
+    {
+      "id": "space-bunny-free",
+      "upstream": "space-bunny-free",
+      "platform": "custom",
+      "tier": "light",
+      "free": true,
+      "rpd": null,
+      "tools": true,
+      "ctx": 131072,
+      "speedRank": 5,
+      "taskKinds": [
+        "summarize",
+        "classify",
+        "batch_rewrite",
+        "format_fix"
+      ],
+      "note": "T-191 weak pool (131K ctx) - mechanical only, must not run long sessions",
+      "weak": true
+    },
+    {
+      "id": "ling-3.0-flash-fin-free",
+      "upstream": "ling-3.0-flash-fin-free",
+      "platform": "custom",
+      "tier": "light",
+      "free": true,
+      "rpd": null,
+      "tools": true,
+      "ctx": 128000,
+      "speedRank": 4,
+      "taskKinds": [
+        "summarize",
+        "classify",
+        "batch_rewrite",
+        "format_fix"
+      ],
+      "note": "T-191 weak pool (128K ctx on custom endpoint) - mechanical only",
+      "weak": true
+    },
+    {
+      "id": "nemotron-3-ultra-free",
+      "upstream": "nemotron-3-ultra-free",
+      "platform": "custom",
+      "tier": "light",
+      "free": true,
+      "rpd": null,
+      "tools": true,
+      "ctx": 128000,
+      "speedRank": 6,
+      "taskKinds": [
+        "summarize",
+        "classify",
+        "format_fix"
+      ],
+      "note": "T-191 weak pool (128K ctx on custom endpoint) - mechanical only",
+      "weak": true
+    },
+    {
+      "id": "nemotron-3.5-lightning-free",
+      "upstream": "nemotron-3.5-lightning-free",
+      "platform": "custom",
+      "tier": "light",
+      "free": true,
+      "rpd": null,
+      "tools": true,
+      "ctx": 128000,
+      "speedRank": 7,
+      "taskKinds": [
+        "summarize",
+        "classify",
+        "format_fix"
+      ],
+      "note": "T-191 weak pool (128K ctx on custom endpoint) - mechanical only",
+      "weak": true
+    },
+    {
+      "id": "zai-org/GLM-5.3-Flash",
+      "upstream": "zai-org/GLM-5.3-Flash",
+      "platform": "custom",
+      "tier": "light",
+      "free": true,
+      "rpd": null,
+      "tools": true,
+      "ctx": null,
+      "speedRank": 7,
+      "taskKinds": [
+        "summarize",
+        "classify",
+        "format_fix"
+      ],
+      "note": "T-191 ctx unknown -> treated as weak; mechanical only",
+      "weak": true
+    },
+    {
+      "id": "MiniMaxAI/MiniMax-M2.7",
+      "upstream": "MiniMaxAI/MiniMax-M2.7",
+      "platform": "custom",
+      "tier": "light",
+      "free": true,
+      "rpd": null,
+      "tools": true,
+      "ctx": null,
+      "speedRank": 7,
+      "taskKinds": [
+        "summarize",
+        "classify",
+        "format_fix"
+      ],
+      "note": "T-191 ctx unknown -> treated as weak; mechanical only",
+      "weak": true
     }
   ]
 }

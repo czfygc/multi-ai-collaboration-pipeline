@@ -54,10 +54,11 @@ export function stageDir(pipeline, stage) {
 // 写阶段产物（字段名 = R2 冻结的 PIPELINE_STAGE_FIELDS + 追加的 evidenceLevel/notes）
 export function writeStageArtifact(pipeline, stage, {
   parentStageId = null, inputs = {}, outputs = {}, decisions = [], artifacts = [],
-  evidenceLevel = 'real', notes = '',
+  evidenceLevel = 'real', notes = '', startedAt = null,
 } = {}) {
   if (!EVIDENCE_LEVELS.includes(evidenceLevel)) throw new Error('非法 evidenceLevel: ' + evidenceLevel);
   const dir = stageDir(pipeline, stage);
+  const finishedAt = new Date().toISOString();
   const obj = {
     schemaVersion: STAGE_SCHEMA_VERSION,
     pipelineId: pipeline.id,
@@ -67,10 +68,21 @@ export function writeStageArtifact(pipeline, stage, {
     outputs,
     decisions,
     artifacts,
-    timestamp: new Date().toISOString(),
+    timestamp: finishedAt,
     evidenceLevel,
     notes,
   };
+  // T-168：阶段耗时（**追加**字段，不改冻结字段名）。
+  // 为什么加：实测一次整链 636s，但 stage.json 只有单个 timestamp，
+  // 无法拆出"哪一段慢"——效率优化没有度量就无法复算。
+  if (startedAt) {
+    const startedMs = typeof startedAt === 'number' ? startedAt : Date.parse(startedAt);
+    if (Number.isFinite(startedMs)) {
+      obj.startedAt = new Date(startedMs).toISOString();
+      obj.finishedAt = finishedAt;
+      obj.durationMs = Date.parse(finishedAt) - startedMs;
+    }
+  }
   const file = join(dir, 'stage.json');
   writeFileSync(file, JSON.stringify(obj, null, 2) + '\n', 'utf8');
   return { file, dir, artifact: obj };

@@ -16,6 +16,10 @@
 //                      只有静态扫描能抓）。活缺陷白名单允许已知条目，修复提交必须同步移除。
 //   ⑦ 体量纪律闸（M12）-> 单文件源码 >50 KiB（51200 B）冻结只减不增 + 拆分义务；
 //                      SIZE_LEDGER 维护超线台账，增长/新超线未登记 → FAIL。
+//   ⑧ 动态 import 解析探针（T-68）-> 静态提取 import('...') 字面量核目标存在性。
+//   ⑨ 损坏词静态闸（T-192）-> git 跟踪文本文件字节级扫写盘事故指纹
+//                      （ufffd/nul/kunjin-kao/tangtangtang/object-object）；随机插词由
+//                      verify-after-write.mjs + vaw-denylist.json 治理。
 // 所有子命令带 watchdog 超时（无限递归类炸弹不会挂死闸门，超时即 FAIL）。
 
 import { readdirSync, existsSync, readFileSync, statSync } from 'node:fs';
@@ -44,8 +48,10 @@ function run(label, args, opts = {}) {
 
 // ① 语法闸门（orchestrator/ 顶层 + lib/ 子目录；T-56 W2.3 起覆盖 lib/ 新模块）
 const libDir = join(__dirname, 'lib');
+const shellDir = join(__dirname, 'shell');
 const mjsFiles = readdirSync(__dirname).filter(f => f.endsWith('.mjs')).sort()
-  .concat(existsSync(libDir) ? readdirSync(libDir).filter(f => f.endsWith('.mjs')).sort().map(f => join('lib', f)) : []);
+  .concat(existsSync(libDir) ? readdirSync(libDir).filter(f => f.endsWith('.mjs')).sort().map(f => join('lib', f)) : [])
+  .concat(existsSync(shellDir) ? readdirSync(shellDir).filter(f => f.endsWith('.mjs')).sort().map(f => join('shell', f)) : []);
 let syntaxOk = 0;
 for (const f of mjsFiles) {
   if (run('syntax ' + f, ['--check', join(__dirname, f)]).ok) syntaxOk++;
@@ -81,6 +87,7 @@ const CLI_SMOKE = [
   ['CLI model-health --help', ['model-health.mjs', '--help']],
   ['CLI supervisor --help', ['supervisor.mjs', '--help']],
   ['CLI artifact-gate --help', ['artifact-gate.mjs', '--help']],
+  ['CLI titan-shell --help', ['shell/titan-shell.mjs', '--help']],
 ];
 const cliT0 = Date.now();
 let cliOk = 0;
@@ -105,16 +112,62 @@ if (cliMs > 30000) {
 }
 console.log('[GATE] -- CLI ' + cliOk + '/' + CLI_SMOKE.length + ' --');
 
-// ④ 测试闸：node --test orchestrator/test/；0 用例视为绿
+// ④ 测试闸：node --test 跑 orchestrator/test/ 下**全部**测试文件（递归子目录）；0 用例视为绿
+// 坑（T-228 Kilo 复核发现）：早前用 readdirSync 只扫顶层，子目录（如 test/skill-evolution/）
+// 里的测试**永远不会被提交闸发现** —— 测试存在但不拦任何东西，正是「有结构没行为」。
 const testDir = join(__dirname, 'test');
-const testFiles = existsSync(testDir) ? readdirSync(testDir).filter(f => /\.(test|spec)\.(mjs|js|cjs)$/.test(f)) : [];
+const TEST_RE = /\.(test|spec)\.(mjs|js|cjs)$/;
+function collectTestFiles(dir) {
+  const found = [];
+  let entries = [];
+  try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return found; }
+  for (const e of entries) {
+    const full = join(dir, e.name);
+    if (e.isDirectory()) {
+      if (e.name === 'node_modules' || e.name === '.git' || e.name.startsWith('_fixture')) continue;
+      found.push(...collectTestFiles(full));
+    } else if (e.isFile() && TEST_RE.test(e.name)) {
+      found.push(full);
+    }
+  }
+  return found.sort();
+}
+const testFiles = existsSync(testDir) ? collectTestFiles(testDir) : [];
 let testOk = 0;
 if (testFiles.length === 0) {
   console.log('[GATE] PASS node --test：0 用例（视绿；W7 收敛后正式化）');
 } else {
-  console.log('[GATE] 测试用例文件 ' + testFiles.length + ' 个，node --test ...');
-  const testArgs = ['--test'].concat(testFiles.map(f => join(testDir, f)));
-  if (run('node --test orchestrator/test/', testArgs, { timeoutMs: 600000, cwd: join(__dirname, '..') }).ok) testOk = testFiles.length;
+  console.log('[GATE] 测试用例文件 ' + testFiles.length + ' 个（含子目录），node --test ...');
+  const testArgs = ['--test'].concat(testFiles);
+  const res = run('node --test orchestrator/test/', testArgs, { timeoutMs: 600000, cwd: join(__dirname, '..') });
+  if (res.ok) testOk = testFiles.length;
+  else {
+    // 失败详情必须点名到用例：早先只打输出最后 3 行，红的可能在中间，
+    // 打出来的全是通过的用例名 —— 等于"有失败但说不出是谁"，无法判断是否本次改动引入。
+    const out = res.out || '';
+    const lines = out.split(/\r?\n/);
+    const names = [];
+    let inFail = false;
+    for (const l of lines) {
+      if (/^✖ failing tests:/.test(l)) { inFail = true; continue; }
+      if (inFail && /^\s*✖/.test(l)) { names.push(l.trim()); if (names.length >= 8) break; }
+      if (inFail && /^\s*ℹ/.test(l)) break;
+    }
+    const summary = lines.filter(l => /^ℹ (tests|pass|fail) /.test(l)).join(' ');
+    // 区分两种失败（口径不同，修法不同）：
+    //   有汇总 + 有用例名  = 某些用例真红（改代码/测试）
+    //   无汇总（ℹ tests 都没打出来）= 整轮被 watchdog 杀掉或加载期崩溃 —— 常因机器被其他测试/任务并行占用（M2 要求串行）
+    if (!summary) {
+      console.log('[GATE] 测试闸：无测试汇总 = 整轮被超时杀掉或加载期崩溃（非某用例红）；确认无其他测试并行、机器空闲后重跑');
+      failures[failures.length - 1] = 'node --test orchestrator/test/ :: 整轮无汇总（被杀/超时/崩溃），非用例红';
+    } else {
+      console.log('[GATE] 测试闸失败明细 ' + summary);
+      if (names.length) for (const n of names) console.log('[GATE]   ✖ ' + n);
+      else console.log('[GATE]   （有用例级 fail 但没解析到失败用例名，见完整日志）');
+      failures[failures.length - 1] = 'node --test orchestrator/test/ :: ' + summary +
+        (names.length ? ' :: ' + names.join(' ; ') : ' :: (用例名未解析)');
+    }
+  }
 }
 console.log('[GATE] -- test ' + (testFiles.length === 0 ? '0/0' : testOk + '/' + testFiles.length) + ' --');
 
@@ -260,6 +313,57 @@ if (dynImportFails.length) {
   console.log('[GATE] PASS 动态 import 解析探针（' + dynImportChecked + ' 处 import() 均可解析）');
 }
 console.log('[GATE] -- 动态 import 解析探针完成 --');
+
+// ⑨ 损坏词静态闸（T-192 写盘事故防线）：git 跟踪的文本文件做字节级快扫，
+// 抓 ufffd 替换符 / NUL / kunjin-kao 类 GBK 乱码 / tangtangtang 填充 / object-object 字面量
+// 等写盘事故指纹（指纹串在源码内拼接拆散，防自指命中）。
+// 排除 archive/ reviews/ tmp/ _test/（历史证据只读 + 测试自脏）与二进制扩展名；
+// VAW_ALLOWLIST 冻结只减不增（2026-10-24 存量清点：2 个历史文档），新命中 → FAIL。
+// 随机插词（Mental/sper/大河/共 等"合法词"损坏）由 verify-after-write.mjs + vaw-denylist.json 治理， vaw-ok
+// 此处只扫无争议字节指纹，避免静态闸误报合法词。
+const VAW_ALLOWLIST = new Set([
+  'design-specs/muse-ai-registration-report-20261021.md',
+  'design-specs/proxy-direction-AE-integration.md',
+]);
+const VAW_BINARY_EXT = /\.(png|jpe?g|gif|ico|zip|gz|7z|exe|dll|pdf|woff2?|ttf|eot|mp3|mp4|sqlite|db|node|wasm|xlsx|docx|pptx)$/i;
+const VAW_NEEDLES = [
+  ['ufffd', Buffer.from([0xef, 0xbf, 0xbd])],
+  ['nul-byte', Buffer.from([0x00])],
+  ['kunjin-kao', Buffer.from('锟斤' + '拷', 'utf8')],
+  ['tangtangtang', Buffer.from('烫烫' + '烫', 'utf8')],
+  ['object-object', Buffer.from('[object ' + 'Object]', 'utf8')],
+];
+{
+  const repoRoot = join(__dirname, '..');
+  const ls = spawnSync('git', ['ls-files'], { cwd: repoRoot, encoding: 'utf8', timeout: 30000 });
+  const tracked = (ls.stdout || '').split(/\r?\n/).filter(Boolean);
+  const scanned = [];
+  const vawFails = [];
+  for (const rel of tracked) {
+    if (VAW_BINARY_EXT.test(rel)) continue;
+    if (/^(archive\/|reviews\/|tmp\/|_test\/|node_modules\/|\.git\/)/.test(rel.replace(/\\/g, '/'))) continue;
+    const abs = join(repoRoot, rel);
+    let st;
+    try { st = statSync(abs); } catch { continue; }
+    if (!st.isFile() || st.size > 2 * 1024 * 1024 || st.size === 0) continue;
+    let buf;
+    try { buf = readFileSync(abs); } catch { continue; }
+    scanned.push(rel);
+    for (const [tag, needle] of VAW_NEEDLES) {
+      if (buf.includes(needle)) {
+        if (VAW_ALLOWLIST.has(rel.replace(/\\/g, '/'))) continue;
+        vawFails.push(rel + ' :: ' + tag);
+      }
+    }
+  }
+  if (vawFails.length) {
+    console.log('[GATE] FAIL 损坏词静态闸 :: ' + vawFails.slice(0, 10).join(' ; ') + (vawFails.length > 10 ? ' …共 ' + vawFails.length + ' 处' : '')); // vaw-ok
+    failures.push('损坏词静态闸 :: ' + vawFails.join(' ; '));
+  } else {
+    console.log('[GATE] PASS 损坏词静态闸（扫描 ' + scanned.length + ' 个跟踪文本文件，白名单冻结 ' + VAW_ALLOWLIST.size + ' 个）');
+  }
+}
+console.log('[GATE] -- 损坏词静态闸完成 --');
 
 console.log('');
 if (failures.length > 0) {

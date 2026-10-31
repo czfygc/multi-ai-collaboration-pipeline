@@ -1,10 +1,10 @@
 ---
 name: titan-handoff
-description: "Use when compacting the current conversation into a handoff document for another agent or a new session, or when the user says '交接' / '写交接文档' / '换个会话继续'. Covers what to include, where to save it, and the TITAN M3 rules (commit WIP or set ledger todo/blocked, save reusable conclusions to shared memory)."
+description: "【协作流程】把当前会话压缩成交接文档交给另一个代理或新会话：写什么、存哪、必做的 M3 纪律（提交 WIP 或把台账改回 todo/blocked、结论入共享记忆）。触发词：交接 / 写交接文档 / 换个会话继续"
 user-invocable: true
-version: 1.0.0
+version: 1.1.0
 requires: none
-tests: manual: 把一次会话压成交接文档并核对要点齐全
+tests: "manual: 把一次会话压成交接文档并核对要点齐全"
 provenance: adapted:mattpocock/skills#unversioned-MIT
 ---
 

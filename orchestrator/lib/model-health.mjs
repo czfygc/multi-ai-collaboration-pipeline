@@ -186,6 +186,7 @@ export function evaluateHealth(entry, { ttlMs = DEFAULT_TTL_MS, now = Date.now()
 export function recommend({
   config = loadTiers(), health = {}, taskTier, taskKind = null, limit = 5,
   allowPaid = false, requireTools = null, ttlMs = DEFAULT_TTL_MS, now = Date.now(),
+  weakFilter = 'any',
 } = {}) {
   const policy = getTaskTier(taskTier, config);
   const needTools = requireTools === null ? (policy.requireTools !== undefined ? policy.requireTools : true) : requireTools;
@@ -195,6 +196,8 @@ export function recommend({
     const allowed = policy.allowedModelTiers || [];
     if (!allowed.includes(m.tier)) continue;
     if (!allowPaid && m.free === false) continue;
+    if (weakFilter === 'only' && m.weak !== true) continue;
+    if (weakFilter === 'exclude' && m.weak === true) continue;
     const h = health[m.id] || null;
     const state = evaluateHealth(h, { ttlMs, now });
     if (state === 'down') continue;
@@ -208,6 +211,7 @@ export function recommend({
       tools_probe: h ? h.tools === true : null,
       intelligenceRank: typeof m.intelligence_rank === 'number' ? m.intelligence_rank : (typeof m.intelligenceRank === 'number' ? m.intelligenceRank : null),
       quotaRank, note: m.note || '',
+      weak: m.weak === true,
       _tierOrder: order.indexOf(m.tier),
     });
   }

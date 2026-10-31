@@ -1,9 +1,9 @@
 ---
 name: titan-code-review
-description: "Use when reviewing a branch, PR, or work-in-progress diff, or when the user says '评审' / '复查改动' / 'review since X' / '能不能合'. Runs TITAN's two axes — Standards (AGENTS.md + repo conventions + Fowler smell baseline) and Spec (ISSUE_REGISTRY task + design spec) — as parallel sub-agents, reported side by side without reranking."
-version: 1.0.0
+description: "【评审复核】评审分支、PR 或未完成改动：双轴并排报告 —— 规范轴（AGENTS.md + 仓库约定 + Fowler 异味）与规格轴（台账任务 + 设计稿），不重排、不越权改代码。触发词：评审 / 复查改动 / 能不能合 / review"
+version: 1.1.0
 requires: none
-tests: manual: 拿一个真实 diff 跑双轴评审并核对 Standards 与 Spec 两侧结论
+tests: "manual: 拿一个真实 diff 跑双轴评审并核对 Standards 与 Spec 两侧结论"
 provenance: adapted:mattpocock/skills#unversioned-MIT
 ---
 

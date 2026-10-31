@@ -288,16 +288,32 @@ export function taskExists(taskName = DEFAULT_TASK_NAME) {
   return r.status === 0;
 }
 
+// T-186：拼 schtasks /Create 参数（纯函数，可单测）。
+// 红线（用户 2026-10-23）：不许把 node.exe 直接交给 schtasks（弹不可关控制台窗）；
+// 必须 SYSTEM（重启后不依赖交互登录）+ HOURLY ensure-running（进程死后 1h 内自愈）。
+export function buildInstallArgs({
+  taskName = DEFAULT_TASK_NAME,
+  repoRoot = REPO_ROOT,
+  userName = 'SYSTEM',
+  intervalHours = 1,
+} = {}) {
+  const vbs = join(repoRoot, 'bin', 'titan-supervisor-launch.vbs');
+  const tr = 'wscript.exe "' + vbs + '"';
+  return [
+    '/Create', '/TN', taskName, '/TR', tr,
+    '/SC', 'HOURLY', '/MO', String(intervalHours),
+    '/RU', userName,
+    '/F',
+  ];
+}
+
 export function installScheduledTask({
-  taskName = DEFAULT_TASK_NAME, nodePath = process.execPath, scriptPath = join(REPO_ROOT, 'orchestrator', 'supervisor.mjs'),
-  startTime = null, runNow = true,
+  taskName = DEFAULT_TASK_NAME, runNow = true, userName = 'SYSTEM', intervalHours = 1,
+  repoRoot = REPO_ROOT,
 } = {}) {
   if (taskExists(taskName)) return { ok: false, status: 'exists', taskName };
-  const st = startTime || new Date(Date.now() + 60 * 1000).toTimeString().slice(0, 8);
-  const tr = '"' + nodePath + '" "' + scriptPath + '" daemon';
-  const create = spawnSync('schtasks.exe', [
-    '/Create', '/TN', taskName, '/TR', tr, '/SC', 'ONSTART', '/F',
-  ], { encoding: 'utf8' });
+  const args = buildInstallArgs({ taskName, repoRoot, userName, intervalHours });
+  const create = spawnSync('schtasks.exe', args, { encoding: 'utf8' });
   if (create.status !== 0) {
     return { ok: false, status: 'create_failed', taskName, detail: String(create.stderr || create.stdout || '').trim().slice(0, 300) };
   }
@@ -340,6 +356,6 @@ export default {
   DEFAULT_SUPERVISOR_DIR, DEFAULT_JOBS_PATH, DEFAULT_STATE_PATH, DEFAULT_TASK_NAME,
   RESTART_POLICIES, JOB_STATUSES, ENV_ALLOWLIST,
   normalizeJob, readJobs, writeJobs, upsertJob, removeJob, readState, writeState, childEnv,
-  runDaemon, taskExists, installScheduledTask, uninstallScheduledTask, summarizeState,
+  runDaemon, taskExists, buildInstallArgs, installScheduledTask, uninstallScheduledTask, summarizeState,
   DEFAULT_LOCK_PATH, acquireDaemonLock, releaseDaemonLock, readLock, pidAlive,
 };

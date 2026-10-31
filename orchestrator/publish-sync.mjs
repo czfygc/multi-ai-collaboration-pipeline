@@ -52,6 +52,12 @@ const DENY_IGNORE_ENTRIES = [
   'orchestrator/p2-fixes.md',
   'orchestrator/audit-evidence/',
   'orchestrator/分阶段拆分计划.md',
+  'orchestrator/分阶段规划.xlsx',
+  'orchestrator/add-plan-board-sheet.py',
+  'orchestrator/sync-plan-board.py',
+  'orchestrator/add-infra-hardening-sheet.py',
+  'orchestrator/gen-phase-plan-xlsx.py',
+  'orchestrator/add-ultimate-goal-sheet.py',
   'orchestrator/计划-收口修复-*',
   'titan-memory/core/CORE.md',
   '.agents/skills/titan-publish-sync/',
@@ -86,6 +92,12 @@ const NEVER_PUBLISH = [
   /^orchestrator\/p2-fixes\.md$/,              // 内部修复日志
   /^orchestrator\/audit-evidence\//,           // 审计证据
   /^orchestrator\/分阶段拆分计划\.md$/,
+  /^orchestrator\/分阶段规划\.xlsx$/,             // 阶段规划表（内部工作产物，非流水线本体）
+  /^orchestrator\/(add-plan-board-sheet|sync-plan-board|add-infra-hardening-sheet)\.py$/, // 规划表维护脚本
+  /^orchestrator\/gen-phase-plan-xlsx\.py$/,     // 规划表生成脚本（内部工具）
+  /^orchestrator\/add-ultimate-goal-sheet\.py$/, // 终极目标调研写入脚本（内部工具）
+  /^orchestrator\/config\/secret-expiry\.json$/,  // 密钥到期台账（含账号名/到期日 → 本地专属）
+  /^orchestrator\/test\/subs-proxy\.test\.mjs$/, // 本地代理环境测试（依赖本机 bin/ 与本机路径）
   /^orchestrator\/计划-收口修复-/,
   /^titan-memory\/core\/CORE\.md$/,            // 实例记忆（非逻辑链；公开仓应各自生成）
   /^titan-memory\/core\//,                    // 实例记忆目录（核心 + 长尾笔记）

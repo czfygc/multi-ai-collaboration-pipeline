@@ -1,10 +1,10 @@
 ---
 name: diagram-design
-description: Create branded architecture, architecture delta, IT current-state, flowchart, sequence, state machine, ER/data model, timeline, swimlane, quadrant, radar/spider, polar chart (polar/radial lollipop), loop/flywheel, nested, tree, org chart, layer stack, exploded axonometric, axonometric plan, Venn, pyramid/funnel, treemap and marimekko, heatmap, bar and dumbbell, waterfall, line (slopegraph, ridgeline, streamgraph, bump), Gantt and scatter charts (bubble, beeswarm), high-level, process, medallion, data flow, DP integration, DP security matrix, Sankey, fishbone, Wardley map, kanban, user journey, service blueprint, deployment, dependency graph, UML class, story map, or database schema diagrams as HTML/SVG/PNG, with .drawio, Mermaid, and .excalidraw import, plus lifecycle phase maps, block decomposition trees, and onboarding guidance.
+description: "【图表】生成架构图、流程图、时序图、状态机、ER/数据模型、泳道、热力图、看板等（HTML/SVG/PNG），支持 Mermaid/.drawio/.excalidraw 导入与配色规范"
 license: MIT
 metadata:
   version: "2.6"
-version: 2.6.0
+version: 1.1.0
 requires: node, python
 tests: python .agents/skills/diagram-design/scripts/self_check.py --offline diagram.html
 provenance: vendored:cathrynlavery/diagram-design#f2f4d49

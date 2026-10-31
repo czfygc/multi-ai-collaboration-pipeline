@@ -1,10 +1,10 @@
 ---
 name: titan-parallel-delegation
-description: "Use when a task is big enough to split across the 4 TITAN clients (OpenCode / Cline / Kilo / DeepSeek Harness) and you want them working at the same time without stepping on each other, or when you are about to hand a sub-task to another client. Covers: how to split by FILE OWNERSHIP (no path overlap), who may touch git, who verifies whom, how to probe a model BEFORE dispatching (free-tier quota is the real bottleneck), the delegation prompt skeleton that works, and the two local traps (background processes get killed; Cline's isolated data-dir providers.json gets reset). Triggers: 并行 / 委派 / 分给别的客户端 / 多客户端协作 / 派活 / delegation / parallel."
+description: "【协作流程】大任务分给 4 客户端并行协作：按文件所有权切分（路径不重叠）、委派者不碰 git（只交文件）、作者≠验证者、派单前先探活目标模型（配额是真瓶颈）、两个本地坑（后台进程被杀 / Cline 独立 data-dir 的 providers.json 会被重置）。触发词：并行 / 委派 / 分给别的客户端 / 派活 / 协作"
 user-invocable: true
 version: 1.1.0
 requires: node, git
-tests: manual: 跑一次并行分单（两单路径不重叠）并按协议收割归口
+tests: "manual: 跑一次并行分单（两单路径不重叠）并按协议收割归口"
 provenance: original
 ---
 

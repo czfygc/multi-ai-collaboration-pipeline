@@ -2,7 +2,7 @@
 // 用法: node titan-execute.mjs <dispatchId> [--executor opencode|cline|kilo|harness]
 // 约束: <200 行、不碰 orchestrate.mjs、verify 前置、同文件串行、edit→verify→PASS 才 commit
 
-import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -11,6 +11,19 @@ import { checkFileSanity } from './lib/file-sanity.mjs';
 import { runPairedTest, runSemanticGuard } from './lib/semantic-guard.mjs';
 import { runProcess } from './lib/proc-tree.mjs';
 import { runCapability, detectLanguage, VERIFY_STATUS } from './lib/verify-profiles.mjs';
+// T-168（2026-10-22 修订）：**零探针**。原"派活前 HTTP 探针"已删除——它每轮探 4 个候选模型，
+// 把免费池额度探挂了（用户裁定 + 4 席复核一致），且有界（4×15s）并非挂死元凶，只是净损耗。
+// 现在：健康状态只读 model-health.mjs 本地健康表（T-172），失败再写回；落点走机器可读映射。
+// 守卫逻辑（检查点/墙钟/二进制/结果写盘）抽到 lib/exec-run-guard.mjs（体量纪律拆回 50 KiB 线下）。
+import { isProviderDownOutput, providerDownReason } from './lib/exec-model-guard.mjs';
+import { createTrace, createWallBudget, checkExecutorReady, noteModelFailure, blockRemainingOnProviderDown, writeExecuteResult, buildNoOpResultRows } from './lib/exec-run-guard.mjs';
+import { parseAcceptDeltas, applyFileAllowlist, detectBrokenDeltaInput } from './lib/exec-delta-parse.mjs';
+// T-168: git scope → lib（体量线+git 超时），薄壳保原签名
+import { captureDirtySet as _captureDirtySet, listUntracked as _listUntracked, cleanupOrphans as _cleanupOrphans, rollbackExecutorChanges as _rollbackExecutorChanges } from './lib/exec-git-scope.mjs';
+const captureDirtySet = () => _captureDirtySet(TITAN_ROOT);
+const listUntracked = () => _listUntracked(TITAN_ROOT);
+const cleanupOrphans = (untrackedBefore, tag) => _cleanupOrphans({ root: TITAN_ROOT, untrackedBefore, tag });
+const rollbackExecutorChanges = (base, tag) => _rollbackExecutorChanges({ root: TITAN_ROOT, base, preDirty, tag });
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // P-27 修复（R3-002，kilo 席发现）：执行器修复轮曾在 ESM 里写 require('./config')/
@@ -39,6 +52,11 @@ const TITAN_ROOT = (() => {
 
 const argv = process.argv.slice(2);
 const dispatchId = argv[0];
+// T-168：执行链持久化检查点（定位"挂死在哪一步"的唯一无额度手段）。
+// 必须在任何 writeResult() 之前建好（writeResult 也要打 RESULT_WRITE 检查点）。
+const execStartedAt = Date.now();
+const traceHandle = createTrace({ dispatchId, root: TITAN_ROOT, startedAt: execStartedAt });
+const trace = (event, fields = {}) => traceHandle.event(event, fields);
 const executorName = argv.includes('--executor') ? argv[argv.indexOf('--executor') + 1] : 'opencode';
 const skipBaseline = argv.includes('--skip-baseline');
 // T-123：语义护栏开关（--skip-semantic 或 TITAN_SEMANTIC_GUARD=0 旁路，紧急用）
@@ -66,6 +84,15 @@ const language = (languageArg && !languageArg.startsWith('--')) ? languageArg.to
 if (!['js', 'py'].includes(language)) {
   console.error('ERROR: --language 必须是 js 或 py（收到: ' + language + '）');
   process.exit(2);
+}
+// T-168 --delta-map：DELTA 落点机器可读映射（{ "DELTA-001": "path" }，plan 阶段产出；旧路径会把中文散文当路径）
+const deltaMapPath = argv.includes('--delta-map') ? argv[argv.indexOf('--delta-map') + 1] : '';
+let deltaMap = null;
+if (deltaMapPath && !deltaMapPath.startsWith('--')) {
+  try {
+    const m = JSON.parse(readFileSync(deltaMapPath, 'utf8'));
+    if (m && typeof m === 'object') deltaMap = m;
+  } catch { /* 映射读不到 → 退回 delta.md 解析（并如实记账） */ }
 }
 
 if (argv.includes('--help') || argv.includes('-h')) {
@@ -149,85 +176,46 @@ const deltaMd = readFileSync(deltaPath, 'utf8');
 const decisionMd = readFileSync(decisionPath, 'utf8');
 
 // 解析 ACCEPT 的 DELTA（兼容实时格式：### DELTA-001 + Decision: ACCEPT）
-function parseAcceptDeltas(deltaText, decisionText) {
-  const acceptIds = new Set();
-  // architect-decision: 支持 "DELTA-001" 单独一行 + 下一行 "Decision: ACCEPT"
-  const decisionLines = decisionText.split('\n');
-  for (let i = 0; i < decisionLines.length; i++) {
-    const m = decisionLines[i].match(/^(DELTA-\d{3})$/);
-    if (m && i + 1 < decisionLines.length) {
-      const next = decisionLines[i + 1].trim();
-      if (/^Decision:\s*(ACCEPT|REJECT|DEFER)/i.test(next) && /ACCEPT/i.test(next)) {
-        acceptIds.add(m[1]);
-      }
-    }
-    // 兼容 "DELTA-001 | ACCEPT" 表格格式
-    const m2 = decisionLines[i].match(/DELTA-(\d{3})\s*[|:]\s*(ACCEPT|REJECT|DEFER)/i);
-    if (m2 && m2[2].toUpperCase() === 'ACCEPT') acceptIds.add('DELTA-' + m2[1]);
-  }
-
-  // delta.md: 支持 "### DELTA-001" 标题
-  const deltaSections = deltaText.split(/^###\s*(DELTA-\d{3})\b/m);
-  const deltas = [];
-  for (let i = 1; i < deltaSections.length; i += 2) {
-    const id = deltaSections[i];
-    const content = deltaSections[i + 1] || '';
-    if (acceptIds.has(id)) {
-      // 尝试提取文件/发现/动作（兼容多种格式）
-      const fileMatch = content.match(/\*\*文件\*\*[:\s]*`?([^`\n]+)`?/i) || content.match(/\*\*File\*\*[:\s]*`?([^`\n]+)`?/i) || content.match(/文件[:\s]*`?([^`\n]+)`?/i);
-      const findingMatch = content.match(/\*\*发现\*\*[:\s]*(.+)/i) || content.match(/\*\*Finding\*\*[:\s]*(.+)/i) || content.match(/Finding[:\s]*(.+)/i);
-      const actionMatch = content.match(/\*\*动作\*\*[:\s]*(.+)/i) || content.match(/\*\*Action\*\*[:\s]*(.+)/i) || content.match(/Action[:\s]*(.+)/i);
-      // 兜底：从内容第一行提取
-      const firstLine = content.trim().split('\n')[0];
-      const fallbackFile = firstLine.match(/([a-zA-Z]:[\\\/][^\s:]+|[.\/][^\s:]+)/);
-      deltas.push({
-        id,
-        file: fileMatch ? fileMatch[1].trim() : (fallbackFile ? fallbackFile[1] : ''),
-        finding: findingMatch ? findingMatch[1].trim() : content.trim().slice(0, 200),
-        action: actionMatch ? actionMatch[1].trim() : '按建议修复'
-      });
-    }
-  }
-  // --file 模式：文件字段稍后被强制覆盖，此处不因空 file 丢弃 DELTA
-  return forceFile ? deltas : deltas.filter(d => d.file); // 必须有文件
+// T-168：解析与白名单归一已抽到 lib/exec-delta-parse.mjs（纯函数，便于单测；体量纪律拆出）。
+const parsedDeltas = parseAcceptDeltas({
+  deltaText: deltaMd, decisionText: decisionMd, deltaMap, forceFile,
+});
+// 无落点的 DELTA **不静默丢**（ChatGPT 复核 P1）：单列出来，稍后如实记 BLOCKED。
+const unresolvedDeltas = parsedDeltas.filter((d) => !d.file && !forceFile);
+const acceptDeltas = parsedDeltas.filter((d) => d.file || forceFile);
+if (unresolvedDeltas.length) {
+  console.log('[SCOPE] ⚠ ' + unresolvedDeltas.length + ' 个 ACCEPT DELTA 没有可用落点（不猜路径）→ 记 BLOCKED: ' +
+    unresolvedDeltas.map((d) => d.id).join(','));
 }
-
-// 按文件分组（同文件串行）
-const acceptDeltas = parseAcceptDeltas(deltaMd, decisionMd);
 if (forceFile) {
   for (const d of acceptDeltas) d.file = forceFile;
   console.log('[SCOPE] --file 强制单文件模式: ' + forceFile + '（' + acceptDeltas.length + ' 个 DELTA）');
 } else if (allowFiles) {
   // R2 白名单归一：精确命中 → 原样；basename 唯一命中 → 归一；否则剔除（幻觉/越界路径）
-  const baseMap = new Map();
-  for (const af of allowFiles) {
-    const b = af.split('/').pop();
-    baseMap.set(b, baseMap.has(b) ? null : af);
-  }
-  let dropped = 0;
-  for (const d of acceptDeltas) {
-    const raw = String(d.file || '').replace(/\\/g, '/');
-    if (allowFiles.includes(raw)) continue;
-    const byBase = baseMap.get(raw.split('/').pop());
-    if (byBase) { d.file = byBase; continue; }
-    dropped++;
-    d._drop = 'file-not-in-allowlist';
-  }
-  const kept = acceptDeltas.filter((d) => !d._drop);
-  console.log('[SCOPE] --files 白名单模式: ' + allowFiles.length + ' 个文件，' + kept.length + '/' + acceptDeltas.length + ' 个 DELTA 通过归一' + (dropped ? '，剔除 ' + dropped + ' 个幻觉/越界路径' : ''));
+  const norm = applyFileAllowlist({ deltas: acceptDeltas, allowFiles });
+  console.log('[SCOPE] --files 白名单模式: ' + allowFiles.length + ' 个文件，' + norm.kept.length + '/' + acceptDeltas.length + ' 个 DELTA 通过归一' + (norm.dropped ? '，剔除 ' + norm.dropped + ' 个幻觉/越界路径' : ''));
   // 重排 accepted 列表为白名单通过项（分组由下方 groups 循环统一完成）
   acceptDeltas.length = 0;
-  acceptDeltas.push(...kept);
+  acceptDeltas.push(...norm.kept);
   if (acceptDeltas.length === 0) {
     writeResult(dispatchId, executorName, [], 'FAIL', '', 2);
     console.error('[SCOPE] 白名单内无可执行 DELTA');
     process.exit(2);
   }
 }
+// T-168 输入体检（占位/空/无裁决 → BLOCKED；口径见 lib/exec-delta-parse.detectBrokenDeltaInput）
+const brokenInput = detectBrokenDeltaInput({ deltaText: deltaMd, decisionText: decisionMd });
+const inputBroken = brokenInput.reason;
+if (inputBroken) trace('DELTA_INPUT_BROKEN', brokenInput);
+
 if (acceptDeltas.length === 0) {
-  console.log('✅ 无 ACCEPT DELTA，无需执行');
-  writeResult(dispatchId, executorName, [], 'PASS', '', 0);
-  process.exit(0);
+  // T-168：无可执行 DELTA 的三分法（未落点/输入没生成完 → BLOCKED；真·全 REJECT → PASS）
+  const noOp = buildNoOpResultRows({ unresolved: unresolvedDeltas, brokenReason: inputBroken });
+  if (noOp.status === 'BLOCKED') console.error('❌ ' + noOp.reason + ' → 记 BLOCKED，不报成功');
+  else console.log('✅ 无 ACCEPT DELTA，无需执行');
+  writeResult(dispatchId, executorName, noOp.rows, noOp.status, '', noOp.exitCode);
+  if (noOp.status === 'BLOCKED') trace('RESULT_WRITE', { status: noOp.status, exitCode: noOp.exitCode, reason: noOp.reason });
+  process.exit(noOp.exitCode);
 }
 
 const groups = new Map();
@@ -235,6 +223,12 @@ for (const d of acceptDeltas) {
   const arr = groups.get(d.file) || [];
   arr.push(d);
   groups.set(d.file, arr);
+}
+
+// T-168（ChatGPT P1）：git 统一 30s 超时（TITAN_EXEC_GIT_TIMEOUT_MS 可覆盖）——git 卡住会同步阻塞主循环、击穿墙钟。
+const GIT_TIMEOUT_MS = Number(process.env.TITAN_EXEC_GIT_TIMEOUT_MS) > 0 ? Number(process.env.TITAN_EXEC_GIT_TIMEOUT_MS) : 30000;
+function gitSync(args, opts = {}) {
+  return spawnSync('git', args, { cwd: TITAN_ROOT, encoding: 'utf8', timeout: GIT_TIMEOUT_MS, ...opts });
 }
 
 // 执行器配置
@@ -314,9 +308,21 @@ async function execAs(profileName, promptText, label) {
     args = ['-NoProfile', '-Command', ps];
   } else {
     cmd = p.cmd[0];
-    args = [...p.cmd.slice(1), promptText, ...(p.modelFlag && p.defaultModel ? [p.modelFlag, p.defaultModel] : []), ...(p.extraArgs || [])];
+    // T-168：执行器模型 = 档案里钉的模型（探针已删除，不再有"探针挑中的模型"）。
+    // 降档执行器保留各自档案里的模型（它们多半不是 freellmapi 网关口径）。
+    const model = p.defaultModel;
+    args = [...p.cmd.slice(1), promptText, ...(p.modelFlag && model ? [p.modelFlag, model] : []), ...(p.extraArgs || [])];
   }
-  const r = await runProcess({ cmd, args, cwd: pCwd, env: pEnv, timeoutMs: t, idleMs: IDLE_MS, label: label + '/' + profileName });
+  trace('EXECUTOR_SPAWN', { executor: profileName, cmd, model: profileName === executorName ? p.defaultModel : null, cwd: pCwd, timeoutMs: t });
+  let firstOutputAt = null;
+  const r = await runProcess({
+    cmd, args, cwd: pCwd, env: pEnv, timeoutMs: t, idleMs: IDLE_MS, label: label + '/' + profileName,
+    onOutput: () => { if (firstOutputAt === null) { firstOutputAt = Date.now(); trace('EXECUTOR_FIRST_OUTPUT', { executor: profileName, label, afterMs: firstOutputAt - execStartedAt }); } },
+  });
+  trace('EXECUTOR_EXIT', {
+    executor: profileName, label, exitCode: r.exitCode, timedOut: !!r.timedOut, hung: !!r.hung,
+    durationMs: r.durationMs, error: r.error || null, firstOutputAt: firstOutputAt ? firstOutputAt - execStartedAt : null,
+  });
   return {
     exitCode: r.exitCode,
     stdout: r.stdout || '',
@@ -365,25 +371,62 @@ async function runWithTimeoutChain(promptText, label, opts = {}) {
 // 结果收集
 const results = [];
 let allPass = true;
+// T-168：已处理 DELTA 集合（模型不可用时据此把"剩下的"一并记 BLOCKED）
+const doneDeltaIds = new Set();
+// T-168（ChatGPT 复核 P1）：无落点的 ACCEPT DELTA 如实记 BLOCKED，不静默丢（漏了几条必须看得见）。
+for (const d of unresolvedDeltas) {
+  results.push({ deltaId: d.id, file: '(未解析落点)', status: 'BLOCKED', exitCode: null, reason: 'delta-target-unresolved', finding: d.finding, action: d.action });
+  doneDeltaIds.add(d.id);
+}
+if (unresolvedDeltas.length) allPass = false;
+
+// T-168：执行链**持久化检查点**——trace 已在 argv 解析后建好（见上），此处只补首批事件。
+trace('EXEC_START', { dispatchId, executor: executorName, pid: process.pid, cwd: TITAN_ROOT });
+trace('DELTA_MAP_LOADED', { hasMap: !!deltaMap, mapKeys: deltaMap ? Object.keys(deltaMap).length : 0, acceptDeltas: acceptDeltas.length });
+
+// T-168：整轮 implement 的**全局墙钟预算**（原来只有"每条 DELTA 600s"，
+// 9 条 × 600s = 90 分钟上限 → 体感就是"挂死"，而且 stage.json 永远不写）。
+// 到点即止链 + 记 BLOCKED + 正常写结果（外层一定能拿到 stage.json）。
+const budget = createWallBudget({ startedAt: execStartedAt });
+const MAX_WALL_MS = budget.maxWallMs;
+const globalDeadline = budget.deadline;
+
+// T-168：执行器就绪检查（**零网络**）：只读健康表 + 可执行文件存在性。
+//   口径：TTL 内标 down → spawn 之前 fail fast（不拿死模型烧额度）；TTL 外 → 不拦。
+const ready = checkExecutorReady({ profiles, executorName, root: TITAN_ROOT, env: process.env });
+trace('HEALTH_CONSULT', {
+  model: ready.health ? ready.health.model : null,
+  state: ready.health ? ready.health.state : null,
+  blocked: ready.health ? ready.health.blocked : null,
+  reason: ready.health ? ready.health.reason : null,
+  candidates: ready.health ? ready.health.candidates.map((c) => ({ id: c.id, state: c.state })) : [],
+});
+console.log('[HEALTH] 模型健康(只读健康表): ' + (ready.health ? ready.health.model + ' state=' + ready.health.state : '(无档案)') +
+  ' | 候选: ' + (ready.health ? ready.health.candidates.map((c) => c.id + '=' + c.state).join(', ') || '(无)' : ''));
+if (ready.binary) {
+  trace('EXECUTOR_RESOLVE', { configured: (profiles[executorName] || {}).cmd?.[0], resolved: ready.binary.cmd, source: ready.binary.source });
+}
+if (!ready.ok) {
+  for (const d of acceptDeltas) {
+    results.push({ deltaId: d.id, file: d.file || '(未解析)', status: 'BLOCKED', exitCode: null, reason: ready.reason + ': ' + ready.detail });
+  }
+  writeResult(dispatchId, executorName, results, 'BLOCKED', '', ready.exitCode || 3);
+  trace('RESULT_WRITE', { status: 'BLOCKED', exitCode: ready.exitCode || 3, reason: ready.reason });
+  console.error('❌ ' + ready.detail + ' → 本轮不执行，记 BLOCKED');
+  process.exit(ready.exitCode || 3);
+}
+if (ready.binary && ready.binary.cmd !== (profiles[executorName] || {}).cmd?.[0]) {
+  console.log('[EXEC-BIN] 执行器路径改用 ' + ready.binary.cmd + '（来源: ' + ready.binary.source + '）');
+  profiles[executorName].cmd[0] = ready.binary.cmd;
+}
 
 // 记录运行前的基准提交
-let baseCommit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: TITAN_ROOT, encoding: 'utf8' }).stdout.trim();
+let baseCommit = gitSync(['rev-parse', 'HEAD']).stdout.trim();
 
 // 运行前脏文件基线（含未跟踪）：调用方自己未提交的工作不算执行器越界。
 // 历史事故：曾用全树 diff 把调用方未提交源码判为越界 → reset --hard 抹掉（M7 违规）。
-function captureDirtySet() {
-  const set = new Set();
-  const st = spawnSync('git', ['status', '--porcelain'], { cwd: TITAN_ROOT, encoding: 'utf8' }).stdout || '';
-  for (const l of st.split('\n')) {
-    if (!l.trim()) continue;
-    const p = l.slice(3).trim();
-    for (const part of p.split(' -> ')) set.add(part.replace(/\\/g, '/'));
-  }
-  const others = spawnSync('git', ['ls-files', '--others', '--exclude-standard'], { cwd: TITAN_ROOT, encoding: 'utf8' }).stdout || '';
-  for (const p of others.split('\n')) if (p.trim()) set.add(p.trim().replace(/\\/g, '/'));
-  return set;
-}
-const preDirty = captureDirtySet();
+// （T-168：已抽到 lib/exec-git-scope.mjs —— 体量纪律拆出 + git 调用统一带超时）
+const preDirty = captureDirtySet(TITAN_ROOT);
 
 // T-49 sanity 护栏（T-56 W7 提取至 lib/file-sanity.mjs 成正式 titan-sanity suite）：
 // 执行器曾把 3665 行文件删成一行 "ALREADY_RESOLVED"，verify 只查 scope/范围照样 PASS——
@@ -392,35 +435,13 @@ function checkSanity(file, pre, diffText) {
   return checkFileSanity(join(TITAN_ROOT, file), pre || null, { diffText });
 }
 
-// T-49 孤儿清理：范围违例回滚只还原目标文件，执行器新建的孤儿文件会留在盘上毒化
-// 后续所有 delta 的范围检查（run2 实测：008 建 decision-api.mjs → 009-022 全灭）。
-// 原则：只删"本 delta 执行器运行期间新出现"的未跟踪文件（运行前已存在的受 untrackedBefore 保护）。
-function listUntracked() {
-  return (spawnSync('git', ['ls-files', '--others', '--exclude-standard'], { cwd: TITAN_ROOT, encoding: 'utf8' }).stdout || '')
-    .split('\n').filter(Boolean);
-}
-function cleanupOrphans(untrackedBefore, tag) {
-  const now = listUntracked();
-  const orphans = now.filter((f) => !untrackedBefore.has(f) && !f.startsWith('reviews/') && !f.startsWith('tmp/'));
-  for (const f of orphans) {
-    try { unlinkSync(join(TITAN_ROOT, f)); console.log('[ORPHAN-CLEAN] 删除执行器残留孤儿文件(' + tag + '):', f); } catch (e) { console.log('[ORPHAN-CLEAN] 删除失败:', f, e.message); }
-  }
-}
+// T-49 孤儿清理 + P-23 回滚 → lib/exec-git-scope.mjs
 
 // P-23（T-49 R2 实测）：错挂文件的 delta 失败时，旧回滚只还原 delta.file——执行器实际
 // 编辑的其他文件留在脏区（008 错挂 cdp-client、实改 A-orchestrate，半截 import 手术遗留）。
 // 正确回滚 = 还原本 delta 基线以来的全部已跟踪改动；preDirty（运行前已脏=他人未提交工作，
 // M7 绝不碰）与 reviews/tmp（证据/日志）豁免。
-function rollbackExecutorChanges(base, tag) {
-  const changed = (spawnSync('git', ['diff', '--name-only', base], { cwd: TITAN_ROOT, encoding: 'utf8' }).stdout || '')
-    .split('\n').filter(Boolean).map((f) => f.replace(/\\/g, '/'));
-  for (const f of changed) {
-    if (preDirty.has(f)) continue;
-    if (f.startsWith('reviews/') || f.startsWith('tmp/')) continue;
-    spawnSync('git', ['restore', '--source=' + base, '--staged', '--worktree', '--', f], { cwd: TITAN_ROOT });
-    console.log('[ROLLBACK] 还原执行器改动(' + tag + '):', f);
-  }
-}
+// （T-168：已抽到 lib/exec-git-scope.mjs —— 体量纪律拆出 + git 调用统一带超时）
 
 // T-163：最近一次 verify 的 profile 结果（syntax 检查状态），随结果条目落盘供审计。
 let lastVerifyProfile = null;
@@ -435,7 +456,7 @@ async function verify(delta, fullDiff, scopedDiff, requireTargetChange = true) {
   }
   // 1. diff 范围检查：只改目标文件 + 允许的附属变更；运行前已脏的文件豁免
   const diffFiles = fullDiff.split('\n').filter(l => l.startsWith('diff --git')).map(l => l.split(' ')[2].slice(2).replace(/\\/g, '/'));
-  const untrackedNow = (spawnSync('git', ['ls-files', '--others', '--exclude-standard'], { cwd: TITAN_ROOT, encoding: 'utf8' }).stdout || '')
+  const untrackedNow = (gitSync(['ls-files', '--others', '--exclude-standard']).stdout || '')
     .split('\n').filter(Boolean).map(f => f.replace(/\\/g, '/'));
   const changed = [...new Set([...diffFiles, ...untrackedNow])];
   const allowedExtra = ['node_modules/', '.vite/', 'dist/', 'build/', '.git/', 'tmp/',
@@ -491,13 +512,28 @@ async function verify(delta, fullDiff, scopedDiff, requireTargetChange = true) {
 }
 
 // 主循环：按文件分组串行
-for (const [file, deltas] of groups) {
+outer: for (const [file, deltas] of groups) {
   console.log('\n=== 处理文件:', file, '(', deltas.length, '个 DELTA ) ===');
   for (const delta of deltas) {
+    // T-168：整轮 implement 的**全局墙钟**闸（15 分钟默认）——到点即止链。
+    // 原来只有"每条 DELTA 600s"，9 条 = 90 分钟上限 → 外层看到的永远是"挂死"，
+    // 而且 stage.json 永远不落盘。现在到点即记 BLOCKED + 正常写结果。
+    if (Date.now() >= globalDeadline) {
+      console.log('⛔ implement 全局墙钟预算耗尽（' + MAX_WALL_MS + 'ms）→ 剩余 DELTA 记 BLOCKED');
+      for (const rest of acceptDeltas) {
+        if (doneDeltaIds.has(rest.id)) continue;
+        results.push({ deltaId: rest.id, file: rest.file, status: 'BLOCKED', exitCode: null, reason: 'implement-wall-budget-exhausted' });
+        doneDeltaIds.add(rest.id);
+      }
+      trace('WALL_BUDGET_EXHAUSTED', { maxWallMs: MAX_WALL_MS, remaining: acceptDeltas.length - doneDeltaIds.size });
+      break outer;
+    }
     console.log('\n---', delta.id, '---');
+    trace('DELTA_START', { deltaId: delta.id, file: delta.file });
     console.log('文件:', delta.file);
     console.log('发现:', delta.finding);
     console.log('动作:', delta.action);
+    doneDeltaIds.add(delta.id);
 
     // P-16（T-49 runs4-7 实测）：历史已有本 delta 的修复提交 → 跳过重跑。全量重跑会诱发
     // 执行器对已修项"再优化"（非确定性），部分改法炸语法被 sanity 拦下 → 每轮 verifyStatus
@@ -506,7 +542,7 @@ for (const [file, deltas] of groups) {
     // 同号且同文件，路径过滤仍误判"已修"。修复提交必须带 dispatchId 前缀，skip 检查同缀匹配。
     // 强制重跑用 --no-skip-prior-fixed。
     if (!argv.includes('--no-skip-prior-fixed')) {
-      const priorFix = spawnSync('git', ['log', '--oneline', '-1', '--grep=^\\[' + dispatchId + '\\]\\[' + delta.id + '\\]', '--', delta.file], { cwd: TITAN_ROOT, encoding: 'utf8' });
+      const priorFix = gitSync(['log', '--oneline', '-1', '--grep=^\\[' + dispatchId + '\\]\\[' + delta.id + '\\]', '--', delta.file]);
       if (priorFix.stdout && priorFix.stdout.trim()) {
         results.push({ deltaId: delta.id, file: delta.file, status: 'PASS', exitCode: 0, reason: 'fixed-in-prior-run', finding: delta.finding, action: delta.action });
         console.log('⏭', delta.id, 'PASS (fixed-in-prior-run：历史已有修复提交，防再编辑抖动)');
@@ -519,7 +555,7 @@ for (const [file, deltas] of groups) {
     // 编排者自己的设施提交）全部落进 git diff baseCommit 的范围检查——run3 实测 023-039
     // 共 16 条 already-resolved 被误判"范围违例"团灭。每 delta 刷新后，diff 窗口只剩
     // 本 delta 执行器的改动；preDirty 仍豁免运行前已脏文件。
-    baseCommit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: TITAN_ROOT, encoding: 'utf8' }).stdout.trim();
+    baseCommit = gitSync(['rev-parse', 'HEAD']).stdout.trim();
 
     // 构建 prompt（不让执行器提交，验证后由 titan-execute 统一 commit）
     const prompt = `改 ${delta.file}：${delta.finding}。建议：${delta.action}。
@@ -576,6 +612,21 @@ ALREADY_RESOLVED 判断（如适用）必须写在你 stdout 回复文本里，*
     }
 
     if (exitCode !== 0) {
+      // T-168：模型/provider 不可用（不是代码问题）→ 记 BLOCKED 并**中止本轮**
+      // （继续跑下去 = 每条 DELTA 各烧一次几十秒的重试，9 条 = 十几分钟白等）。
+      if (isProviderDownOutput((stdout || '') + (stderr || ''))) {
+        const why = providerDownReason((stdout || '') + (stderr || ''));
+        console.log('⛔ 执行器模型不可用: ' + why + ' → 中止本轮剩余 DELTA');
+        cleanupOrphans(untrackedBefore, 'executor-model-down');
+        // 把这次失败写回健康表（本地文件写，零网络）→ 下一轮 spawn 之前就能 fail fast，
+        // 不用再拿死模型烧一遍额度。
+        noteModelFailure({ profiles, executorName, reason: why });
+        blockRemainingOnProviderDown({ acceptDeltas, doneDeltaIds, results, current: delta, reason: why });
+        writeResult(dispatchId, executorName, results, 'BLOCKED', '', 3);
+        trace('RESULT_WRITE', { status: 'BLOCKED', exitCode: 3, reason: 'executor-model-unavailable', detail: why });
+        console.error('❌ 执行器模型不可用（' + why + '）→ 本轮中止，记 BLOCKED');
+        process.exit(3);
+      }
       console.log('❌ 执行器退出码:', exitCode);
       console.log('stdout:', stdout.slice(0, 500));
       console.log('stderr:', stderr.slice(0, 500));
@@ -591,8 +642,8 @@ ALREADY_RESOLVED 判断（如适用）必须写在你 stdout 回复文本里，*
     
     // 主路径：初始化值（后续仅在retry分支中重新赋值）
     {
-      const fullTemp = spawnSync('git', ['diff', baseCommit], { cwd: TITAN_ROOT, encoding: 'utf8' }).stdout;
-      const scopedTemp = spawnSync('git', ['diff', baseCommit, '--', delta.file], { cwd: TITAN_ROOT, encoding: 'utf8' }).stdout;
+      const fullTemp = gitSync(['diff', baseCommit]).stdout;
+      const scopedTemp = gitSync(['diff', baseCommit, '--', delta.file]).stdout;
       full = fullTemp;
       scoped = scopedTemp;
     }
@@ -618,8 +669,8 @@ PROOF: ${delta.file}:<行号>: <该行原文片段（逐字，>=8 字符）>
        if (retry.exitCode === 0) {
          stdout = retry.stdout;
          // 重试分支：使用 let 声明临时变量
-         let retryFull = spawnSync('git', ['diff', baseCommit], { cwd: TITAN_ROOT, encoding: 'utf8' }).stdout;
-         let retryScoped = spawnSync('git', ['diff', baseCommit, '--', delta.file], { cwd: TITAN_ROOT, encoding: 'utf8' }).stdout;
+         let retryFull = gitSync(['diff', baseCommit]).stdout;
+         let retryScoped = gitSync(['diff', baseCommit, '--', delta.file]).stdout;
          // 赋值回外部作用域的 full/scoped
          full = retryFull;
          scoped = retryScoped;
@@ -653,8 +704,8 @@ PROOF: ${delta.file}:<行号>: <该行原文片段（逐字，>=8 字符）>
         }
         if (proofRetry.exitCode === 0) {
           stdout = proofRetry.stdout;
-          full = spawnSync('git', ['diff', baseCommit], { cwd: TITAN_ROOT, encoding: 'utf8' }).stdout;
-          scoped = spawnSync('git', ['diff', baseCommit, '--', delta.file], { cwd: TITAN_ROOT, encoding: 'utf8' }).stdout;
+          full = gitSync(['diff', baseCommit]).stdout;
+          scoped = gitSync(['diff', baseCommit, '--', delta.file]).stdout;
           arProof = extractAlreadyResolvedProof(stdout);
           proofOk = !scoped.trim() && proofLineMatches(join(TITAN_ROOT, delta.file), delta.file, arProof.proof);
         } else {
@@ -737,14 +788,14 @@ PROOF: ${delta.file}:<行号>: <该行原文片段（逐字，>=8 字符）>
     // 验证通过，提交这次改动（add/commit 状态必须检查——静默失败会产生"PASS 但没提交"的假证据）
     // P-18：提交消息带 dispatchId 前缀，skip 检查同缀匹配，跨 dispatch 撞号免疫。
     const commitMsg = `[${dispatchId}][${delta.id}] fix: ${delta.finding.slice(0, 60)}`;
-    const addR = spawnSync('git', ['add', delta.file], { cwd: TITAN_ROOT, encoding: 'utf8' });
+    const addR = gitSync(['add', delta.file]);
     if (addR.status !== 0) {
       console.log('❌ git add 失败:', (addR.stderr || '').trim());
       results.push({ deltaId: delta.id, file: delta.file, status: 'FAIL', exitCode: addR.status, reason: 'git-add-failed' });
       allPass = false;
       continue;
     }
-    const commitR = spawnSync('git', ['commit', '-m', commitMsg], { cwd: TITAN_ROOT, encoding: 'utf8' });
+    const commitR = gitSync(['commit', '-m', commitMsg]);
     if (commitR.status !== 0) {
       console.log('❌ git commit 失败:', (commitR.stderr || commitR.stdout || '').trim().slice(0, 300));
       results.push({ deltaId: delta.id, file: delta.file, status: 'FAIL', exitCode: commitR.status, reason: 'git-commit-failed' });
@@ -753,7 +804,7 @@ PROOF: ${delta.file}:<行号>: <该行原文片段（逐字，>=8 字符）>
     }
 
     // 更新基准提交为最新提交
-    const newBase = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: TITAN_ROOT, encoding: 'utf8' }).stdout.trim();
+    const newBase = gitSync(['rev-parse', 'HEAD']).stdout.trim();
     baseCommit = newBase;
 
     // 验证通过，结果已提交
@@ -768,20 +819,14 @@ const finalVerdict = allPass ? (blockedCount > 0 ? 'BLOCKED' : 'PASS') : 'FAIL';
 const finalExit = allPass ? (blockedCount > 0 ? 3 : 0) : 1;
 writeResult(dispatchId, executorName, results, finalVerdict, '', 0);
 if (blockedCount > 0) console.log('⛔ BLOCKED 记账: ' + blockedCount + ' 条（超时链耗尽/降档失败，非回归失败，交人核）');
+trace('EXEC_END', { verdict: finalVerdict, exitCode: finalExit, deltas: results.length, blocked: blockedCount });
 process.exit(finalExit);
 
-// 写 execute-result.json
+// 写 execute-result.json（已抽到 lib/exec-run-guard.writeExecuteResult）
 function writeResult(dispatchId, executor, deltas, verifyStatus, gitDiff, exitCode) {
-  const result = {
-    dispatchId,
-    deltas: deltas.map(d => ({ deltaId: d.deltaId || d.id, file: d.file, finding: d.finding, action: d.action, status: d.status, reason: d.reason, semantic: d.semantic || null })),
-    executor,
-    verifyStatus,
-    gitDiff: '',
-    exitCode,
-    timestamp: new Date().toISOString()
-  };
-  const outPath = join(TITAN_ROOT, 'reviews', dispatchId, 'layer-b', 'execute-result.json');
-  writeFileSync(outPath, JSON.stringify(result, null, 2), 'utf8');
-  console.log('📝 结果已写入:', outPath);
+  const { outPath, result } = writeExecuteResult({
+    root: TITAN_ROOT, dispatchId, executor, deltas, verifyStatus, exitCode,
+    log: (m) => console.log(m),
+  });
+  trace('RESULT_WRITE', { status: verifyStatus, exitCode, deltas: result.deltas.length, path: outPath });
 }

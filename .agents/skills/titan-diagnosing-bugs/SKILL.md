@@ -1,9 +1,9 @@
 ---
 name: titan-diagnosing-bugs
-description: "Use for hard bugs and performance regressions, or when the user says '诊断' / '查这个 bug' / '为什么报错' / '变慢了'. TITAN diagnosis loop: build a red-capable feedback loop first, minimise, rank falsifiable hypotheses, instrument one variable at a time, fix with a regression test, then clean up and archive evidence."
-version: 1.0.0
+description: "【排障调研】难 bug 与性能回退的诊断闭环（先建可复现反馈回路 → 最小化 → 排可证伪假设 → 一次只动一个变量 → 修完带回归测试 → 归档证据）；含未知事物探寻 SOP（本地→搜索引擎→站点取证→交叉验证→五席会诊→沉淀落盘）与「先搜后问」。触发词：诊断 / 查这个 bug / 为什么报错 / 变慢了 / 先 Google 搜 / 不知道这个 API"
+version: 1.1.0
 requires: none
-tests: manual: 造一个可复现的失败用例并走完诊断闭环
+tests: "manual: 造一个可复现的失败用例并走完诊断闭环"
 provenance: adapted:mattpocock/skills#unversioned-MIT
 ---
 
@@ -56,6 +56,28 @@ provenance: adapted:mattpocock/skills#unversioned-MIT
 ### 真的造不出回路
 
 停下来明说，列出试过的方法，向用户要：(a) 能复现的环境访问权；(b) 脱敏抓包（HAR/日志/core dump/带时间戳录屏）；(c) 临时加生产探针的授权。**没有回路不许猜。**
+
+### 本机专属：假执行器复现（**零额度**，2026-10-22 T-168 教训）
+
+本机的执行链（`orchestrator/titan-execute.mjs`）默认派**真模型**去改代码。
+**绝不许拿真模型当"复现工具"**——一次复现就是一次额度消耗（实测：探针 4 个候选 × 每轮 implement
+一次，把免费池额度探挂了，用户原话"模型都给你探挂了"；盲跑复现一次 implement ≈ 600s 墙钟 + 9 次调用）。
+
+**正确姿势：用假执行器在本地把 bug 复现出来。**
+
+| 步骤 | 做法 |
+|---|---|
+| 1. 造假执行器 | 在沙箱仓（`test-projects/landmine-001`）写一个 fixture 脚本：想模拟"挂死"就 `setTimeout(()=>{}, 20000)` 不输出；想模拟"慢"就 `sleep`；想模拟"模型不可用"就打印 `No candidate model has a configured, usable provider key` |
+| 2. 写假档案 | 在沙箱 `config/executor-profiles.json` 里加一个 profile：`{ cmd: [process.execPath, 'hang.mjs'], modelFlag: '--model', defaultModel: 'x', env: {}, cwd: '.', timeoutMs: 600000 }`（测试结束必须还原该文件） |
+| 3. 调小预算 | `TITAN_EXEC_TIMEOUT_MS=600`、`TITAN_EXEC_IDLE_MS=800`、`TITAN_EXEC_MAX_WALL_MS=3000`、`TITAN_EXEC_BACKOFF_MS=120` —— 秒级复现，不用等 600s |
+| 4. 断言症状 | 断言**用户说的那个**症状：产物是否落盘？`execute-result.json` 的 `verifyStatus` 是不是 BLOCKED？检查点 `reviews/<dispatchId>/executor-trace.jsonl` 里最后一个事件是什么（`EXECUTOR_SPAWN` 之后没有 `EXECUTOR_EXIT` ⇒ 挂在子进程里） |
+| 5. 一次只动一个变量 | 每改一处假设就重跑这条命令（秒级） |
+
+现成的样板： `orchestrator/test/titan-execute-w6.test.mjs`（超时→退避→降档→BLOCKED 记账）、
+`orchestrator/test/proc-tree.test.mjs`（挂起杀整棵树 + 孤儿清理）。
+**新发现的挂死/超时类 bug，先照这个样板写一条秒级回归测试，再谈修。**
+
+> 有了这条纪律，"挂死点定位"就**不再需要烧额度**——检查点文件（`executor-trace.jsonl`）直接告诉你挂在哪一步。
 
 ### 本阶段完成判据
 
@@ -115,3 +137,240 @@ TITAN 附加：回归测试须登记 `orchestrator/test/SUITES.md`，证据（�
 - [ ] 一次性脚本/原型已删（M2：`tmp/` 与 `_probe_*` 会话结束前清干净）
 - [ ] 根因写进提交信息与台账证据，让下一个调试者少走弯路
 - [ ] 台账状态推进并提交；修复由非作者客户端复核（M2）
+
+---
+
+<!-- 以下为已并入的原技能「titan-search-then-interrogate」正文（存档保留，勿删） -->
+
+# 原技能：titan-search-then-interrogate
+
+# 先搜后问：未知问题研究通道（用户钦定必备技能）
+
+> 用户长期规则（2026-10-11 钦定，延用到任何项目）："我遇到问题先找 google 搜，再不行就把一批网页 AI
+> 全部交叉审问一遍。" 本技能把它固化为标准研究通道。
+
+## 1. 何时用
+
+- 撞到**未知报错/怪现象**，本地工具（tail/日志/API）已给事实但给不出根因；
+- 需要**社区经验**（坑库帖、他人踩过）或**多方知识交叉**（多模型共识）时；
+- 与 `titan-review-channels` 的分工：那个管"**查错验收**"（对已完成产物的审查选型），
+  本技能管"**未知问题根因研究**"（对未知现象的调查）。
+
+> **更完整的版本见 `titan-unknown-exploration`**（2026-10-21 新增）：把"探寻未知"整条链
+> 写成可机械执行的编号 SOP —— S1 明确问题 → S2 本地优先 → S3 搜索引擎 → **S4 站点取证分级**
+> （raw 直链 → webfetch → 内嵌 JSON → 网络面板签名直链 → 字幕/音频转写）→ S5 多源交叉 →
+> **S6 升级到 5 席会诊**（4 审 + ChatGPT 裁决；触发条件：无先例的架构决策 / ≥2 个未决分歧 /
+> 置信度不足）→ S7 报告+台账+记忆+技能四件套沉淀。
+> 本技能专注"搜索 → 交叉审问"两段；**要完整流程、要站点取证手法、要写回沉淀**时用那个。
+
+## 2. 通道一：搜索引擎先行（必走第一关）
+
+1. **DuckDuckGo html 版**（首选，scrape 友好）：
+   `webfetch https://html.duckduckgo.com/html/?q=<url编码查询词>` → 结果摘要直接可读。
+2. **Google**（需要时）：CDP 浏览器开新 tab 导航 google.com/search?q=…（勿动已登录 tab）。
+3. 查询词带**错误码+环境限定**：`<错误码> <技术> <关键限定>`（如 `Workers custom domain 522 free plan`）。
+4. **优先级排序**：社区实测帖（community.cloudflare.com / stackoverflow / answeroverflow）
+   > 官方文档（developers.cloudflare.com）> 营销性教程站。
+5. 每条线索**当场全文抓取**（webfetch 原帖），不要只看搜索摘要——机理藏在回帖里
+   （实证：IDN-522 帖的 Staff 回复给出"改用 Worker Route"工作区，摘要里看不到）。
+
+## 3. 通道二：网页 AI 席交叉审问（搜索无果/需验证时）
+
+### 3.1 席位（CDP 浏览器 `127.0.0.1:9222`，persistent profile 持登录态）
+
+| 席位 | URL 子串 | 备注 |
+|---|---|---|
+| DeepSeek | chat.deepseek.com | |
+| Qwen | chat.qwen.ai | 现役对抗席（2026-10-12 T-57 起） |
+| Gemini | gemini.google.com/app | |
+| ChatGPT | chatgpt.com | |
+| Grok（备胎） | grok.com | enabled:false——导航超时+强模型收费，已被 Qwen 顶替，仅历史参考 |
+
+> 席位名单唯一事实源 = `orchestrator/reviewers.yaml`（enabled:true）；本表仅为速查。
+
+驱动方法见技能 `titan-cdp-browser-ops`（`tmp/cdp-drv.mjs` v2 + `@文件` 模式；
+重型用 playwright-core/Playwright MCP `connectOverCDP`）。**正式的评审协议**（Layer A/B/裁决）走
+`titan-four-party-consult`；本技能是**轻量问询**：不冻结 artifact、不做 dispatch lineage，
+但保留其两条核心纪律——席间隔离（A 的回答不进 B 的 prompt）+ 原文无损落盘。
+**席位"沉默"先排除捕获时序**：raw 短/侧栏垃圾 ≠ 席位死——按 截图→会话历史→raw 顺序复核
+（T-57 实证：gemini 表面沉默，实际完整答案已在对话里）。
+
+### 3.2 问询模板（facts-first，全部席位同一份）
+
+```
+[技术咨询] <一句话现象>
+事实清单（全部实测，非猜测）：
+- <事实1（含证据类型：tail/HTTP码/DNS/API返回）>
+- <事实2> ...
+已排除：
+- <已证伪的假设>（让 AI 不走死路）
+搜索线索（可选附）：
+- <Google/DDG 已发现的社区帖要点>
+问题：1) 最可能根因排序？2) 每条的验证方法（一条命令/一个实验）？3) 已知规避方案？
+要求：直接给结论与验证步骤，不要反问。
+```
+
+### 3.3 收集与合成
+
+- 每席回答**原文落盘** `tmp/<问题>-consult/<seat>.txt`（Layer A 精神：无损，不改写）；
+- 合成表：**共识**（≥2 席同结论）→ 优先行动；**分歧**（席间冲突）→ 设计判别实验裁决；
+  **独有洞见**（单席提出且未被搜索命中）→ 用低成本实验验证后再信；
+- AI 回答是**线索不是证据**——任何结论落地前必须有本地实测（curl/tail/API）复现确认。
+
+## 4. 红线
+
+1. **脱敏**：prompt 不携带密钥/token/UUID/订阅 URL/账号邮箱——网页 AI 是第三方。
+   域名只给到"某免费二级域 zone"级别即可问出机理（实证：本次 522 问询不需要暴露 UUID）。
+2. **不污染**：勿在登录态 tab 里导航无关站点；勿把一个席位生成的答案粘贴进另一个席位
+   （除非明确标注"另一 AI 意见，请批判"）。
+3. **不重复灌**：同一席位同一 prompt 禁止重发（配额是资源）；修正后再发须带新事实。
+4. CDP 断连 = 浏览器被关：让用户跑 `orchestrator\启动 CDP 浏览器.bat`，勿自启。
+
+## 5. 实战案例（2026-10-11，cf2-522）
+
+现象：B 账号 Worker 绑 custom domain `cf2.<免费二级域>`，API 显示 enabled+cert 已发，
+DNS/TLS 正常，但 HTTP 522；`wrangler tail` 零事件；同 worker 在 workers.dev 可达（后测 500
+是另一独立问题）。用户独立部署的第二个 worker 同 zone 也 522。
+
+- **DDG 搜索**命中 `community.cloudflare.com/t/idn-custom-domain-fails-to-connect-to-worker`：
+  同签名（custom domain "Active" 但 522，workers.dev 正常）——证明这是一个**已知故障家族**；
+- **判别实验链**（搜索引擎给方向，本地实验给证据）：
+  ① tail 零事件 → 请求未达 worker（排除 worker 代码）；
+  ② workers.dev 开启（注意 TOML 坑：`workers_dev=true` 必须在顶层，写在 `[[routes]]` 后会被吞进 routes）→ 请求可达；
+  ③ 同 zone 第二个 worker（用户部署）同样 522 → **zone 级系统性**，与单 worker 无关；
+- 结论方向：免费二级子域 zone 上 Workers custom domain 边缘路由不生效（用户另购一级域名解决）。
+- 坑补记：wrangler `tail` 在该账号出现"连接成功但零事件"异常，异常文本改走 dashboard Live Logs 抓取。
+
+## 6. 维护
+
+由 opencode 会话创建（2026-10-11，用户授权固化）。新坑/新席位/新模式照抄本文件格式更新并提交。
+
+---
+
+<!-- 以下为已并入的原技能「titan-unknown-exploration」正文（存档保留，勿删） -->
+
+# 原技能：titan-unknown-exploration
+
+# 未知事物探寻 SOP（弱模型也能照做）
+
+> 目标：**把"我不知道 X"变成"我有带出处的 X"**，并且最终把结论沉淀成技能/记忆，让下次不用重来。
+> 适用：陌生服务、陌生 API、视频/文档内容抓取、未有先例的架构设计、跨领域选型。
+
+---
+
+## 0. 铁律（5 条，违反即返工）
+
+1. **不许凭记忆下结论**。所有事实必须有出处：命令输出 / 页面原文 / 官方文档 / 视频原字幕。
+2. **先便宜后昂贵**：本地文件 → 搜索引擎 → 站点取证 → 会诊席。**不得跳级**（例如连本地 grep 都没做就开会诊）。
+3. **单源不算结论**。关键事实至少 **2 个独立来源**交叉；冲突时以**官方/一手/实测**为准，并记录分歧。
+4. **每一步都要留下可复现产物**（文件/日志/命令输出），不能只在脑子里过。
+5. **不确定就标 UNKNOWN**，不许用"应该是/大概"填空。
+
+---
+
+## 1. 主流程（严格按序，每步都有出口）
+
+### S1 明确问题边界（5 分钟）
+- 把"未知"拆成可回答的小问题：`X 是什么 / 能不能用 X 做 Y / 怎么用 X 做 Y / 有什么坑`。
+- 写清**用途**和**成功判据**（例："拿到 Muse 注册的前置条件清单"= 成功；"了解 Muse"= 失败）。
+- 出口：问题能被"是/否/步骤/清单"回答。仍太大 → 拆到最小可回答单元。
+
+### S2 本地优先（10 分钟）
+```powershell
+& <workspace>\bin\rg.exe -n "关键词" --glob '!node_modules/**' .   # 仓库内是否已有
+git log --oneline -20 -- <路径>                                             # 是否做过
+```
+- 命中已有实现/记录 → **直接复用**，不重新研究。
+- 出口：确定"本地无"或"本地已有 X"，写进工作记录。
+
+### S3 搜索引擎（20 分钟）
+- 优先 **DuckDuckGo html 版**（`https://html.duckduckgo.com/html/?q=...`）、Bing、Google。
+- **被挡时的替代序**（实测 2026-10-21）：
+  1. DDG 返回 "bots use DuckDuckGo too / Select all squares containing a duck" → **换 Bing/Google**；
+  2. 仍挡 → **用本机 CDP 浏览器**（127.0.0.1:9222，已登录）打开 Google 搜索页，用 `Runtime.evaluate` 抓 `div.MjjYud`/`h3` 结构取标题+URL+摘要（`playwright_browser_navigate` + `browser_evaluate`）。
+- 查询词构造：`对象 + 动作 + 症状`，中英各试一遍；把站点限定词加上（`site:github.com`、`site:x.com`）。
+- 出口：拿到 ≥3 个候选来源，**列出待取证清单**（哪条结论靠哪条来源证实）。
+
+### S4 站点取证（30–90 分钟，本 SOP 的核心）
+按"难度"从低到高逐级尝试，**每级失败才升级**：
+
+| 级 | 方法 | 适用 | 关键点 |
+|---|---|---|---|
+| L1 | 官方 raw 直链 | GitHub README/LICENSE | `raw.githubusercontent.com/<owner>/<repo>/<branch>/<file>`；**API 403 限流时 raw 仍可用**（T-143 实证） |
+| L2 | `webfetch` 抓文章页 | 博客/文档/新闻 | 抓正文，剥导航噪声；只信正文段落 |
+| L3 | CDP 浏览器读**内嵌 JSON** | SPA 页面 | `window.ytInitialPlayerResponse` / `__NEXT_DATA__` 等，比读 DOM 稳；`videoDetails` 常含标题/时长/简介 |
+| L4 | CDP 浏览器**网络面板取签名直链** | 需 token 的资源 | 资源直链返回 200 但**长度 0** → 是缺签名参数；从**网络面板**取播放器自己发出的那条完整 URL（含 `signature`/`pot`/`xorb`），再页内 `fetch` |
+| L5 | **字幕/音频转写** | 视频内容 | 见下方 §2 |
+| L6 | 换源 | 同一事实找第二来源 | 单源不可信时必做 |
+
+**YouTube 字幕取证（实证 2026-10-21，yt-dlp 三道墙）**：
+1. `yt-dlp --cookies-from-browser brave` → 报 `Sign in to confirm you're not a bot`（本机 Brave 无 YouTube 登录态时必现）
+2. `--extractor-args "youtube:player_client=web_safari"` → 报 `The page needs to be reloaded`（client 被拒）；若改成 `Requested format is not available` 说明**已拿到流**
+3. `--write-auto-subs` → **HTTP 429** 限流；直链 fetch → **200 但长度 0**（缺 `signature`/`pot`）
+4. ✅ 走通路径：**CDP 浏览器打开视频页 → 网络面板找 `timedtext` 请求 → 取带 `signature`+`pot` 的完整 URL → 页内 `fetch(url)` 解析 `fmt=json3` → 按 `events[].tStartMs` 切片取指定时间段**（同 startTime 多行要合并）
+5. 音频流 `streamingData.adaptiveFormats[].url` 常为 `null`（YouTube 新版 SABR 流保护）→ 字幕不可得时才需另找带签名音频直链 + 本地 Whisper（`http://127.0.0.1:3001/v1/audio/transcriptions`，model `whisper-1`）
+
+**动态页取证通则**：先找**内嵌 JSON**（L3）→ 再找**接口响应**（L4）→ 最后才读 DOM 文本。DOM 文本常常是壳。
+
+### S5 交叉验证（20 分钟）
+- 每个关键结论标注来源编号；**至少 2 源**才能写成结论，单源写"据单一来源（未交叉）"。
+- 冲突处理优先级：**官方文档 > 一手实测 > 社区帖 > 视频口述**。视频口述只作**线索**，不作为最终事实。
+- 出口：结论表（结论 / 来源 / 置信度 / 已知缺口）。
+
+### S6 升级到 5 席会诊（**仅在以下情况**）
+触发条件（任一）：
+- 要做**没有先例的架构/选型决策**（"怎么设计 X"）；
+- S3–S5 后仍有 **≥2 个未决分歧**，或结论置信度不足；
+- 需要**反方视角**找自己方案的盲点。
+
+执行（照 `.agents/skills/titan-four-party-consult/SKILL.md` 的协议）：
+- 席位 = **`reviewers.yaml` 的 `reviewers_role` 4 席（gemini/deepseek/qwen/grok）+ architect 1 席（ChatGPT 裁决）= 5 席**；`enabled:true` 才算在席。
+- **网页席有每日额度**（发附件/消息都计）→ 开会诊前先查额度，把问题**一次性问全**，别多轮试探。
+- 送审材料必须是**自足**的（结论表 + 证据原文 + 明确要决策的点），不是"你懂我的意思吧"。
+- 产出：Layer A 各席 raw → delta.md（去重汇总）→ ChatGPT 逐条 accept/reject/defer 裁决。
+- 关键实现坑（2026-10-21 实证）：`--architect` 只吃 8 位 hex dispatchId，`scan-*` 需放行；ChatGPT 会把用户气泡渲染成 `You said:` 引用块混进 innerText，需 marker 剥离；判定词要允许同行 `DELTA-001: accept` 格式。
+
+### S7 产出与沉淀（**不可省**）
+1. **写报告**到 `design-specs/<主题>-<YYYYMMDD>.md`：结论先行 → 事实与出处 → 风险/边界 → 待用户拍板项。
+2. **开台账**（`orchestrator/edit-issue.mjs`）：结论、可执行的下一步、阻塞条件。
+3. **落共享记忆**（`titan_memory_remember`）：一句话事实 + 关键词标签（供下次 `titan_memory_recall` 命中）。
+4. **回写技能**：本次新学到的坑/手法 → 追加到对应 `SKILL.md`（授权：用户长期允许自主新增/更新技能文档并提交）。
+5. **风险动作不执行**：凡涉及"注册/下单/付费/提交不可逆表单"的动作，**只出方案与前置条件清单，不代为执行**（见 §3）。
+
+---
+
+## 2. 弱模型执行提示（照做即可，不必推理）
+
+- 严格按 S1→S7 顺序，**一次只做一步**，做完再进下一步。
+- 每步产出物固定：S1 问题清单 → S2 本地命中/未命中 → S3 候选来源表 → S4 取证原文 → S5 结论表 → S6 裁决（可选）→ S7 报告+台账+记忆+技能。
+- 遇到"要不要再搜一下"：**S4 里同一方法最多试 2 次**，仍失败就升到下一级；不要在同一条路上磨。
+- 遇到"要不要问用户"：出现**不可逆动作**、**需要付费/账号**、**分歧无解** → 停，列选项 + 推荐项，问用户。
+- 记不住细节就回查本文件；**不要凭印象补全**。
+- 完成后自检 4 问：① 每个结论有出处吗？② 关键结论 ≥2 源吗？③ 报告/台账/记忆/技能四件都落了吗？④ 有没有把不可逆动作替用户做了？
+
+---
+
+## 3. 边界与红线
+
+- **不可逆/有代价的动作**（注册账号、绑卡、下单、提交带身份信息的表单、批量发消息）：**只调研 + 出前置条件清单，等用户拍板再执行**。
+  - 尤其：某平台"注册失败即占用该资源"（例：注册失败后该邮箱不能再注册）→ **必须先满足全部前置条件再提交**，不许拿唯一资源试错。
+- **不代为执行规避平台风控/地区限制/身份验证的操作**；可以整理公开信息、给出合规路径与风险。
+- 密钥、令牌、账号凭据：走环境变量或已忽略的 `titan_secrets.env`，**不进命令行、不进 URL、不进仓库**（M5）。
+- 抓取只读公开内容；不绕过登录/付费墙；不刷接口（会触发反爬并浪费额度）。
+- 引用他人内容时注明出处与许可状态；不确定许可 → 只做"设计参考"，不复制原文入库（参 T-148 的 M5 审查流程）。
+
+---
+
+## 4. 关联技能
+
+| 场景 | 用哪个 |
+|---|---|
+| 会诊协议（送审/分层/裁决解析） | `titan-four-party-consult`（5 席 = role 4 + ChatGPT 裁决） |
+| 浏览器/CDP/反爬/动态页取证 | `titan-cdp-browser-ops`（§12 有 YouTube 字幕取证法） |
+| 查错通道选型 | `titan-review-channels` |
+| 记忆读写 | `titan-cross-session-memory` |
+| 台账编辑 | `titan-registry-edit` |
+
+---
+
+*创建：2026-10-21（opencode）· 来源：T-159 Muse AI 注册调研实战（YouTube 反爬字幕取证 + Google 检索 + 三源交叉）与 T-71/T-72 网页席实战。*

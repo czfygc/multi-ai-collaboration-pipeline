@@ -79,6 +79,31 @@ test('T-146 技能标注上游 MIT 来源', () => {
   }
 });
 
+test('frontmatter 须为合法 YAML：未加引号的值不得含 ": "（T-215 回归）', () => {
+  // 背景（T-215）：dsh-skill-filesystem 用严格 YAML 解析 frontmatter；`tests: manual: xxx`
+  // 这类**未加引号且含 ": "** 的值会解析报错（Nested mappings are not allowed in compact
+  // mappings）→ 该技能被静默忽略 → 强制附加技能也拿不到 payload（曾致 11 个共用技能失效）。
+  // 本测试按 YAML 块映射规则做定向校验：非引号包裹的值若含 ": " 即判非法。
+  const dirs = skillDirs();
+  assert.ok(dirs.length > 0, '技能目录为空');
+  for (const name of dirs) {
+    const raw = readFileSync(join(SKILLS_DIR, name, 'SKILL.md'), 'utf8');
+    const fm = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+    assert.ok(fm, name + ': 缺 frontmatter');
+    for (const line of fm[1].split(/\r?\n/)) {
+      const kv = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+      if (!kv) continue;                        // 缩进行（嵌套映射）或非键值行 → 跳过
+      const value = kv[2].trim();
+      if (value === '') continue;               // 空值 → 可能是嵌套映射
+      if (/^["'].*["']$/.test(value)) continue; // 已加引号 → 合法
+      assert.ok(
+        !value.includes(': '),
+        `${name}: frontmatter 字段 "${kv[1]}" 的值含未加引号的 ": "（YAML 非法，DSH 会忽略该技能）→ 请加引号`,
+      );
+    }
+  }
+});
+
 test('工作流索引覆盖全部五个技能并与 M1-M7 分工', () => {
   const file = join(SKILLS_DIR, 'ENGINEERING-WORKFLOW.md');
   assert.ok(existsSync(file), '缺少 ENGINEERING-WORKFLOW.md');

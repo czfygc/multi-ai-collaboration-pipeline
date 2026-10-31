@@ -33,7 +33,9 @@ export function killTree(pid) {
 
 /**
  * 异步跑一个子进程，带空闲看门狗与硬超时。
- * @param {object} o { cmd, args, cwd, env, timeoutMs, idleMs, label }
+ * @param {object} o { cmd, args, cwd, env, timeoutMs, idleMs, label, onOutput }
+ *   onOutput：可选回调，**首次**收到 stdout/stderr 数据时触发（T-168 执行链检查点用；
+ *             不传则行为与从前完全一致）。
  * @returns {Promise<{exitCode:number|null, stdout:string, stderr:string, timedOut:boolean, hung:boolean, durationMs:number, error:?string}>}
  */
 export function runProcess(o) {
@@ -43,6 +45,7 @@ export function runProcess(o) {
   const env = o.env || process.env;
   const timeoutMs = Number(o.timeoutMs) > 0 ? Number(o.timeoutMs) : 0;   // 0 = 不设硬超时
   const idleMs = Number(o.idleMs) > 0 ? Number(o.idleMs) : 0;            // 0 = 不设空闲看门狗
+  const onOutput = typeof o.onOutput === 'function' ? o.onOutput : null;
   const started = Date.now();
   return new Promise((resolve) => {
     let child;
@@ -60,8 +63,14 @@ export function runProcess(o) {
     let settled = false;
 
     const touch = () => { lastActivity = Date.now(); };
-    if (child.stdout) child.stdout.on('data', (d) => { stdout += d.toString(); touch(); });
-    if (child.stderr) child.stderr.on('data', (d) => { stderr += d.toString(); touch(); });
+    let outputSeen = false;
+    const notifyOutput = () => {
+      if (outputSeen) return;
+      outputSeen = true;
+      try { onOutput(); } catch { /* 回调异常不能影响子进程管理 */ }
+    };
+    if (child.stdout) child.stdout.on('data', (d) => { stdout += d.toString(); touch(); notifyOutput(); });
+    if (child.stderr) child.stderr.on('data', (d) => { stderr += d.toString(); touch(); notifyOutput(); });
 
     let idleTimer = null;
     let hardTimer = null;

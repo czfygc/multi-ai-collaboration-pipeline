@@ -316,6 +316,7 @@ async function submitForm(cdp, sessionId, reviewer, log) {
   }, sessionId);
   log.submit = submitR.result.value;
   log.phase.push('submitted');
+  log.t_submit = Date.now();   // 计量：问题发出时刻（不含等待）
 }
 
 function computeResponseTimeout(reviewer, promptText) {
@@ -485,6 +486,7 @@ async function runTabBase(cdp, page, reviewer, promptText, rawDir, shotDir, opti
    }, sessionId);
    log.submit = submitR.result.value;
    log.phase.push('submitted');
+  log.t_submit = Date.now();   // 计量：问题发出时刻（不含等待）
    
    // Handle post-submit logic if provided
    if (postSubmitCallback) {
@@ -563,8 +565,10 @@ async function runTabBase(cdp, page, reviewer, promptText, rawDir, shotDir, opti
    try {
      finalSnap = await waitForResponse(cdp, sessionId, { maxMs: responseMaxMs, stableMs: isUploadMode ? RESPONSE_STABLE_UPLOAD_MS : RESPONSE_STABLE_DEFAULT_MS, extraSelectors: reviewer && reviewer.response_selector });
      log.phase.push('responded');
+     log.t_response = Date.now();   // 计量：回复捕获时刻
    } catch (e) {
      log.phase.push('response-timeout');
+     log.t_timeout = Date.now();   // 计量：等回复超时时刻
      // 快照可能同样失败（页面导航/session 失效/序列化异常）：
      // 兜底合成最小快照，保证 raw md 与后续 analyze/architect 链路不崩，并保留原始错误。
      let snapR = null;

@@ -10,7 +10,7 @@ import {
   buildManifest, writeManifest, readManifest, verifyManifest, manifestFingerprint, listFiles,
 } from '../lib/artifact-manifest.mjs';
 import { checkLicenses, parseNotice, ARTIFACT_PROFILES } from '../lib/license-notice-check.mjs';
-import { verifyAnonDownload } from '../lib/anon-download-verify.mjs';
+import { verifyAnonDownload, makeResilientFetch } from '../lib/anon-download-verify.mjs';
 import { evaluateStages, runStageGate } from '../lib/stage-gate.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
@@ -219,6 +219,27 @@ test('匿名可下载：哈希不符 → FAIL；网络异常 → UNKNOWN；没�
     fetchImpl: fakeFetch(() => ({ status: 200, body: 'hello' })),
   });
   assert.equal(noExpected.status, 'UNKNOWN');
+});
+
+test('匿名可下载：网络层失败时自动回落到 curl（代理环境必需）', async () => {
+  // 内置 fetch 抛网络错误 → 组合器必须回落到 fallback（curl 适配器），而不是把 UNKNOWN 当结论
+  const primary = async () => { throw new Error('fetch failed'); };
+  const fallback = async (url, init = {}) => ({
+    status: 200,
+    arrayBuffer: async () => Buffer.from('hello'),
+    text: async () => 'hello',
+  });
+  const resilient = makeResilientFetch({ fetchImpl: primary, fallbackImpl: fallback });
+  const res = await resilient('https://example.invalid/f', { method: 'GET' });
+  assert.equal(res.status, 200);
+  assert.equal(await res.text(), 'hello');
+  // 回落成功时，闸门整体应判 PASS（而不是 UNKNOWN）
+  const gate = await verifyAnonDownload({
+    download: 'https://example.invalid/f',
+    expected: { sha256: '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824', bytes: 5 },
+    fetchImpl: resilient,
+  });
+  assert.equal(gate.status, 'PASS');
 });
 
 test('匿名可下载：私有源码仓返回 200 → FAIL', async () => {

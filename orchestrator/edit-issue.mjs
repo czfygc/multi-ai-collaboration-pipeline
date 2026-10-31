@@ -6,7 +6,7 @@
 // 用法示例：
 //   node orchestrator/edit-issue.mjs --id T-131 --title "xxx" --type fix --status claimed --owner cline --description "xxx" --files ISSUE_REGISTRY.json --files design-specs/x.md
 // 退出码：0=成功，1=运行时错误，2=参数错误，3=JSON 校验失败
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
 import { resolve, extname } from 'node:path';
 import { gate, classifyTarget, isHighRisk } from './lib/write-gate.mjs';
 import {
@@ -83,7 +83,7 @@ if (!id) {
   console.error('[EDIT-ISSUE] 缺少必填参数: --id');
   console.error('用法: 新建 -> node orchestrator/edit-issue.mjs --id <id> --title <title> --type <type> --status <status> --owner <owner> --description <desc> [--files <f> ...] [--branch <b>] [--registry <path>] [--verifier <v>]');
   console.error('      更新 -> node orchestrator/edit-issue.mjs --id <id> [--status <status>] [--verifier <v>] [--owner <owner>] [--title <title>] [--type <type>] [--description <desc>] [--files <f> ...] [--branch <b>] [--registry <path>]');
-  console.error('      证据 -> 追加 --evidence \'{"k":"v"}\'（合并进 evidence）；M2 结果用 --cv-status / --cv-verifier / --cv-evidence');
+  console.error('      证据 -> 追加 --evidence \'{"k":"v"}\'（合并进 evidence；路径须存在且非超时失败——T-240 证据闸）；M2 结果用 --cv-status / --cv-verifier / --cv-evidence');
   console.error('      回填 -> --fields-json <path>（UTF-8 JSON 文件，可含 title/description/type/status/owner/branch/verifier/files/evidence，精确回填免转义）');
   process.exit(2);
 }
@@ -240,6 +240,52 @@ let effCV = prev && prev.cross_validation && typeof prev.cross_validation === 'o
 if (cvStatus != null) effCV.status = cvStatus;
 if (cvVerifier != null) effCV.verifier = cvVerifier;
 if (cvEvidence != null) effCV.evidence = cvEvidence;
+
+// T-240 证据闸（Kilo 中断分析④，2026-10-30）：本次 --evidence/--cv-evidence/--fields-json.evidence
+// 引用的路径必须真实存在，且 headless 证据不得是失败运行（timedOut=true / code!=0 / dol RED）
+// —— 治 T-226 式「台账 done 但引用的证据实为超时空输出」伪通过。只查本次新引用值，不追溯旧键。
+function evidenceGateFail(msg) {
+  console.error('[EDIT-ISSUE][EVIDENCE-GATE] 拒绝: ' + msg);
+  process.exit(1);
+}
+function isPathLike(v) {
+  return typeof v === 'string' && v.length > 0
+    && (v.includes('/') || v.includes('\\'))
+    && !/^https?:\/\//i.test(v);
+}
+function checkEvidencePath(p) {
+  const abs = resolve(process.cwd(), p);
+  if (!existsSync(abs)) evidenceGateFail('证据文件不存在: ' + p);
+  let st;
+  try { st = statSync(abs); } catch { evidenceGateFail('证据文件不可读: ' + p); return; }
+  if (!st.isFile()) return; // 目录只验存在
+  const head = readFileSync(abs, 'utf8').slice(0, 8000);
+  // 只扫文件头连续 `# ` 元数据行（headless 头恒在首行起）；
+  // 文档正文引用 `# timedOut=true` 等示例文本不算证据头（正例自测抓过全文扫误伤）。
+  const hdrLines = [];
+  for (const ln of head.split(/\r?\n/)) {
+    if (/^# /.test(ln)) hdrLines.push(ln);
+    else break;
+  }
+  const headerBlock = hdrLines.join('\n');
+  if (!headerBlock) return; // 非 headless 头格式 → 只验存在
+  if (/# timedOut=true/i.test(headerBlock)) evidenceGateFail('证据是超时失败运行(timedOut=true)，不算有效证据: ' + p);
+  const m = headerBlock.match(/# code=(-?\d+)/);
+  if (m && m[1] !== '0') evidenceGateFail('证据客户端退出码非 0(code=' + m[1] + ')，不算有效证据: ' + p);
+  if (/# dol_verdict=RED/.test(headerBlock)) evidenceGateFail('证据 DOL 判 RED(自述完成零证据): ' + p);
+}
+const gateVals = [];
+if (evidenceJson) {
+  try {
+    const patchAgain = JSON.parse(evidenceJson);
+    for (const v of Object.values(patchAgain || {})) if (isPathLike(v)) gateVals.push(v);
+  } catch { /* 参数错误已在上方处理并退出 */ }
+}
+if (hasField('evidence') && patchFields.evidence && typeof patchFields.evidence === 'object') {
+  for (const v of Object.values(patchFields.evidence)) if (isPathLike(v)) gateVals.push(v);
+}
+if (isPathLike(cvEvidence)) gateVals.push(cvEvidence);
+for (const p of gateVals) checkEvidencePath(p);
 
 const entry = {
   id,

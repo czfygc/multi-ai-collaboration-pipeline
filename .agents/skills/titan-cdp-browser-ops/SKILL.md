@@ -1,9 +1,9 @@
 ---
 name: titan-cdp-browser-ops
-description: Use when operating the TITAN CDP browser (127.0.0.1:9222) to drive web dashboards (Cloudflare / katabump / 任何站点), register accounts or free subdomains, automate multi-step wizards (add-site / DNS / API token / 表单), or when a task needs browser clicks/fills beyond curl+API. Includes cdp-drv.mjs v2 (new/close/shot/#id精确选tab/auto-IIFE), CDP HTTP endpoints, Playwright MCP (@playwright/mcp via --cdp-endpoint) + playwright-core, inject-secret/xhr-spy helpers, API-first principle, pitfalls library (SPA/React/OAuth/DigitalPlat), web-seat ops & capture-timing diagnosis (reviewers.yaml single source), security rules (M7). 完整实战源档见同目录 浏览器操作实例-20261011-Cline.md。维护授权见文末。
-version: 1.0.0
+description: "【浏览器】操作本机 CDP 浏览器（127.0.0.1:9222）驱动网页：多步向导与表单、API 优先原则、截图取证、坑库（SPA/React/OAuth/DigitalPlat）与安全红线。触发词：浏览器操作 / CDP / 注册账号 / 多步向导 / 填表"
+version: 1.1.0
 requires: node, cdp-browser-9222, playwright-core
-tests: manual: 用 cdp-drv.mjs 开一个标签页并回读标题
+tests: "manual: 用 cdp-drv.mjs 开一个标签页并回读标题"
 provenance: original
 ---
 

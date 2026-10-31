@@ -9,5 +9,13 @@ start "" "%CHROME_EXE%" ^
   --remote-debugging-address=127.0.0.1 ^
   --user-data-dir=%~dp0..\chrome-cdp-profile ^
   --no-first-run ^
-  --no-default-browser-check
+  --no-default-browser-check ^
+  --disable-background-timer-throttling ^
+  --disable-backgrounding-occluded-windows ^
+  --disable-renderer-backgrounding ^
+  --disable-popup-blocking ^
+  --remote-allow-origins=* ^
+  --disable-features=CalculateNativeWinOcclusion ^
+  --disable-blink-features=AutomationControlled ^
+  --test-type
 echo CDP browser launching on 127.0.0.1:9222 (profile: chrome-cdp-profile)

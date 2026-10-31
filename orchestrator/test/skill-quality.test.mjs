@@ -135,7 +135,9 @@ test('必填字段集合固定为 6 项', () => {
 
 test('仓内全部技能通过质量门（回归：新增技能必须补齐元数据）', () => {
   const r = scanSkills({ skillsRoot: join(REPO_ROOT, '.agents', 'skills'), repoRoot: REPO_ROOT });
-  assert.ok(r.total >= 19, '技能数量异常：' + r.total);
+  // T-183（2026-10-22 技能整合）：21 → 15（同族合并 + 删纯别名），下限随之下调；
+  // 仍保留护栏：低于 15 说明技能被误删，要查。
+  assert.ok(r.total >= 15, '技能数量异常：' + r.total);
   const bad = r.skills.filter(s => !s.ok).map(s => s.name + ': ' + s.errors.join('; '));
   assert.deepEqual(bad, [], '不合规技能：\n' + bad.join('\n'));
 });

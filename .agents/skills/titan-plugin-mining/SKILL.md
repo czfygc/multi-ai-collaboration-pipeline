@@ -1,7 +1,7 @@
 ---
 name: titan-plugin-mining
-description: T-148 "只挖插件/技能" 的挖掘记录与 M5 许可审查：梳理 cursor/plugins（跨客户端 .cursor-plugin 规范）与 claude-plugins-official（skills/commands）的结构、许可、与 V2 .agents/skills/ 的映射；不直接 vendor 第三方技能原文，只借鉴规范模式，入库前逐 plugin 读 LICENSE 确认。
-version: 1.0.0
+description: "【工具链】只挖插件与技能：梳理 cursor/plugins（.cursor-plugin 规范）与 claude-plugins-official（skills/commands）结构、许可与映射，不 vendor 第三方原文，入库前逐个读 LICENSE。触发词：挖插件 / 挖技能 / plugin mining"
+version: 1.1.0
 requires: none
 tests: node --test orchestrator/test/skill-manifest.test.mjs
 provenance: original

@@ -4,6 +4,13 @@
 titan_secrets.env
 %USERPROFILE%/titan/titan_secrets.env
 
+# 恢复码 / 二因素恢复凭据 —— 属密钥级，永不入库（2026-10-22 用户开了 GitHub 2FA 后落盘）
+**/github-recovery-codes*.txt
+**/*recovery-code*.txt
+**/*recovery_code*.txt
+*.recovery-codes
+
+
 # Python artifacts
 __pycache__/
 *.py[cod]
@@ -66,6 +73,9 @@ orchestrator/audit-evidence/autopilot/verify-*.json
 # verify-gate meta 测试沙箱（测试自建自清理，勿入库）
 tmp/gate-meta/
 
+# 一次性临时脚本目录（会话级探索产物，结束前必须清理，勿入库）
+tmp/
+
 # 单写者文件锁（lib/lock.mjs 运行时锁，持有期间存在，勿入库）
 orchestrator/work-orders.json.lock
 orchestrator/*.write.lock
@@ -79,6 +89,7 @@ bin/*
 !bin/*.json.example
 !bin/*.html
 !bin/*.ps1
+!bin/*.vbs
 
 .playwright-mcp/
 
@@ -101,3 +112,8 @@ archive/sandbox/
 
 # T-150 coding 记忆链原型的运行期数据（可再生；不进共享记忆库）
 titan-memory/chain-data/
+
+test-projects/landmine-001/
+
+# 未展开环境变量 %SystemDrive% 产生的 Windows 缓存垃圾（T-249 会话清理 2026-10-31）
+%SystemDrive%/

@@ -19,6 +19,9 @@ jobs:
           node-version: 20
 
       - name: ISSUE_REGISTRY JSON 校验
+        # T-250：台账按 M8 永不发布 → 公开仓干净检出没有 ISSUE_REGISTRY.json，
+        # 无台账可校时跳过本步（本地 pre-commit 钩子的 fail-closed 不受影响）。
+        if: hashFiles('ISSUE_REGISTRY.json') != ''
         run: node orchestrator/pre-commit-check.mjs
 
       - name: Skill quality gate (T-155)

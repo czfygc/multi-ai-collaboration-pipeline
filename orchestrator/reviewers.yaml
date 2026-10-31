@@ -45,6 +45,12 @@ reviewers_role:
     enabled: true
     editor_selector: '.ql-editor[contenteditable="true"]'
     submit_selector: 'button[aria-label="发送"]'
+    editor_kind: "contenteditable"
+    # T-217（2026-10-28）：默认 response_selector=body 会连编辑器里刚注入的 prompt 一起抓，
+    # 造成"抓到自己的提问"假成功（T-217 web-seat 实证）。gemini 回复容器=model-response。
+    response_selector: 'model-response'
+    # generating_selector 实测后回填真实值（不猜）；见 archive/evidence/T-208/seat-cards.md
+    generating_selector: null
     upload_strategy: "direct"
     # T-89（2026-10-17 实证）：skip_fresh_chat:true 复用脏会话（V8 旧会话）时，
     # 旧 model-response 在新回复到达前即满足 waitForResponse 稳定窗 → 950 字旧回复
@@ -73,6 +79,8 @@ reviewers_role:
     response_selector: "div.ds-markdown"
     editor_selector: 'textarea[placeholder="Message DeepSeek"]'
     submit_selector: '[role="button"].ds-button--circle.ds-button--primary'
+    editor_kind: "textarea"
+    generating_selector: null
     upload_strategy: "direct"
     file_input_selector: 'input[type="file"]'
     upload_button_selector: null
@@ -96,10 +104,13 @@ reviewers_role:
     enabled: true
     editor_selector: 'textarea.message-input-textarea'
     submit_selector: 'button.send-button'
-    upload_strategy: "drag"
+    editor_kind: "textarea"
+    generating_selector: null
+    # T-208 1.9：drag → direct（截图坐标拖拽是 T-158 八连败根因；DOM.setFileInputFiles 直传待 1.11c 实测）
+    upload_strategy: "direct"
     file_input_selector: 'input[type="file"]'
-    upload_button_selector: '.mode-select-open'
-    upload_menu_item_text: '上传附件'
+    upload_button_selector: null
+    upload_menu_item_text: null
     upload_wait_ms: 3000
 
   - name: grok
@@ -120,6 +131,8 @@ reviewers_role:
     enabled: true
     editor_selector: 'div.tiptap.ProseMirror'
     submit_selector: 'button[aria-label="Submit"]'
+    editor_kind: "contenteditable"
+    generating_selector: null
     response_selector: '.message-bubble.rounded-3xl'
     upload_strategy: "direct"
     file_input_selector: 'input[type="file"].hidden'
@@ -139,6 +152,10 @@ reviewers_role:
     editor_selector: '[contenteditable="true"].ProseMirror'
     # 与 architect 段对齐：不设 submit_selector，走 testid send-button 兜底链（T-62 生产验证）
     submit_selector: null
+    editor_kind: "contenteditable"
+    generating_selector: null
+    # T-208 1.9：无发送按钮 → 走 Enter 键发送（Input.dispatchKeyEvent），Enter 被吞时 web-seat 回退点击
+    send_mode: "enter"
     response_selector: "main"
     upload_strategy: "direct"
     file_input_selector: 'input[type="file"]'

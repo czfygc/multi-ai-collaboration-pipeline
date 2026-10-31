@@ -1,10 +1,10 @@
 ---
 name: titan-quant-tool-discipline
-description: "Use for TITAN quantitative research tool selection: dedicated specialist tools first for point-in-time checks, series/data quality, walk-forward OOS validation, trading costs, deflated Sharpe, parameter sensitivity, research pipelines, and structured charts. Preserve UNKNOWN and report fallback limitations."
+description: "【量化】量化研究工具选型纪律：专用工具优先、点时一致性/样本质量/滚动 OOS/交易成本/Deflated Sharpe/参数敏感性；保留 UNKNOWN 并说明回退限制。触发词：量化 / 回测 / 因子 / IC / Sharpe"
 user-invocable: true
-version: 1.0.0
+version: 1.1.0
 requires: quant-mcp
-tests: manual: 对一个点位检查题走专用工具优先流程
+tests: "manual: 对一个点位检查题走专用工具优先流程"
 provenance: original
 ---
 
