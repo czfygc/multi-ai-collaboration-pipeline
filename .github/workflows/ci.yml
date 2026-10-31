@@ -12,6 +12,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # T-250：gitleaks 要扫 push 区间 diff，浅克隆（默认 depth=1）拿不到
+          # 历史父提交会报 unknown revision（scanned ~0 bytes）——全量拉取。
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
