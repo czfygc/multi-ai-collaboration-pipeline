@@ -1,6 +1,0 @@
-name: titan-claw-connector
-display_name: TITAN Claw Connector
-description: Connects LangBot/LangTARS Telegram messages to TITAN pipeline orchestrator via HTTP gateway. Only allows verified users to submit tasks.
-version: 0.1.0
-author: TITAN_ARCHAEOLOGY
-langbot_version: ">=4.0.0"
