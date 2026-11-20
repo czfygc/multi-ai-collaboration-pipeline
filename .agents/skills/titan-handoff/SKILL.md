@@ -1,8 +1,8 @@
 ---
 name: titan-handoff
-description: "【协作流程】把当前会话压缩成交接文档交给另一个代理或新会话：写什么、存哪、必做的 M3 纪律（提交 WIP 或把台账改回 todo/blocked、结论入共享记忆）。触发词：交接 / 写交接文档 / 换个会话继续"
+description: "【协作流程】把会话压成交接文档给别的代理/新会话：写什么、存哪、M3 纪律。触发词：交接 / 写交接文档 / 换个会话继续"
 user-invocable: true
-version: 1.1.0
+version: 1.2.0
 requires: none
 tests: "manual: 把一次会话压成交接文档并核对要点齐全"
 provenance: adapted:mattpocock/skills#unversioned-MIT
@@ -34,7 +34,7 @@ provenance: adapted:mattpocock/skills#unversioned-MIT
 
 - **默认**：系统临时目录（Windows `%TEMP%`）。交接文档是会话间的一次性载体，不入库。
 - **需要另一个客户端在同一工作区接手**：放 `tmp/<T-xx>/HANDOFF.md`（`tmp/` 不属根目录公共文件），下个会话认领任务后读完即删。
-- **禁止**：仓库根目录、`design-specs/`（那是长期设计文档，不是会话状态）。
+- **禁止**：仓库根目录、`design-specs/`（那是长期设计文档，不是会话状态）。\n- **例外（2026-11-04 用户点名授权）**：给**另一个客户端接手修复**用的诊断/交接报告放 `design-specs/handoff-YYYYMMDD-<主题>-to-<client>.md`（长期可查、对方按路径取用）；其余会话状态仍按上面两条。这类分诊报告见技能 `titan-gate-triage` §4。
 
 ## 文档必含内容
 
@@ -58,6 +58,18 @@ provenance: adapted:mattpocock/skills#unversioned-MIT
 ## 坑与禁忌
 <本会话踩过的坑、试过但失败的路、不能碰的文件/命令>
 
+> **checkpoint 四字段同口径（T-315，与 `titan-session-retro` §7 对齐，两处不许漂移）**：
+> 1. 做了什么（事实+证据） 2. 定了什么（含被否决的方案） 3. 症状→原因（每坑一条） 4. 下一步（第一动作 + 验证命令）
+> 本模板里的「已完成/关键决定/坑与禁忌/下一步」分别对应四字段；写交接文档时按四字段自检一遍。
+
+## 约束存活清单（T-255 M4 双轴·一）
+<本会话确立的硬约束逐条列出，标注来源（AGENTS/CORE/设计稿/用户原话），
+换会话后这些约束必须还活着；漏列一条 = 下个会话可能悄悄违背它>
+
+## 覆盖对账（T-255 M4 双轴·二）
+<未决事项全列 + 对应源文位置；交接时核对每条未决事项都能在源文/证据逐字找回——
+用 grep 对源文逐字搜关键断言（`rg -n "<断言>" <源文件>`），搜不到 = 交接写岔了>
+
 ## 证据与文档指针
 <archive/evidence/T-xx/...、design-specs/...、提交号>
 
@@ -68,6 +80,21 @@ provenance: adapted:mattpocock/skills#unversioned-MIT
 ## 安全
 <已脱敏；密钥位置用环境变量名指代，不写值>
 ```
+
+### 负结论锚（M3 · 与 titan-session-retro/titan-handoff 共用同一字句，防漂移见 orchestrator/test/m3-negative-block.test.mjs）
+什么方法试过没用，也要带锚，防止下次无脑重试同一个坑：
+- 什么没用：<一句话>
+- 证据哈希：<命令输出/证据文件的 SHA256，或证据文件路径+哈希>
+- invalidate_when：<依赖文件/版本变化时该负结论自动过期>
+- 重试条件：<满足什么条件才值得重试，否则不重试>
+
+## 阻塞上报格式（移植自 dsh-flash-presets v3 规则 12，MIT © LarryE135）
+
+报告"阻塞 / blocked"时必须带**确切命令 + 观测输出**：
+
+- 写清你跑了哪条命令（原样可复跑，含参数与工作目录）。
+- 贴上真实观测输出（退出码、报错原文、关键计数）；不许"跑了但是不行"。
+- 缺命令或缺输出 = 不是阻塞报告，是抱怨——接手方无法验证，也无法接续。
 
 ## 写作纪律
 

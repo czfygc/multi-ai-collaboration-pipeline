@@ -82,11 +82,29 @@ test('killTree: grandchildren die with the parent (no orphan left behind)', asyn
     const before = statSync(marker).size;
     assert.ok(before > 0, 'grandchild should be writing, size=' + before);
     killTree(p.pid);
-    await sleep(1500);
-    const afterKill = statSync(marker).size;
-    await sleep(1500);
+    // 等待进程树彻底死亡：轮询检查 marker 文件大小不再增长（负载不敏感）
+    let stableCount = 0;
+    let lastSize = -1;
+    let stabilized = false; // T-280 复修：稳定标志必须参与断言，否则孤儿继续写也会通过
+    for (let i = 0; i < 30; i++) { // 最多等 30 * 200ms = 6s
+      await sleep(200);
+      const curSize = statSync(marker).size;
+      if (curSize === lastSize) {
+        stableCount++;
+        if (stableCount >= 3) { stabilized = true; break; } // 连续 3 次（600ms）无增长视为稳定
+      } else {
+        stableCount = 0;
+      }
+      lastSize = curSize;
+    }
     const afterWait = statSync(marker).size;
-    assert.equal(afterWait, afterKill, 'grandchild must be dead (file must stop growing): ' + afterKill + ' -> ' + afterWait);
+    // T-280 复修：断言「文件确实停止增长」，而不是只断言「文件没变小」——
+    // 后者在孙进程存活（孤儿继续写）时同样成立，等于把测试要抓的 bug 放走。
+    // 实测：detached 孤儿（逃出 job object）场景下 before=14 → afterWait=72、stabilized=false。
+    assert.ok(stabilized, 'grandchild must be dead (file must stop growing), still growing: ' + before + ' -> ' + afterWait);
+    assert.ok(afterWait >= before, 'file should not shrink: ' + before + ' -> ' + afterWait);
+    // 额外验证：grandchild 进程确实已死（Windows tasklist / POSIX ps 不再可见）
+    // 这里通过文件停止增长作为代理指标；若需更严可加 tasklist/ps 检查
   } finally {
     spawnSync('cmd', ['/c', 'rmdir', '/s', '/q', dir], { encoding: 'utf8' });
   }

@@ -30,35 +30,29 @@ reviewers_role:
   - name: gemini
     display_name: "Gemini"
     url_match: "gemini\\.google\\.com"
-    url_open: "https://gemini.google.com/"
+    url_open: "https://gemini.google.com/app"
     perspective: "架构与接口契约"
     perspective_prompt: |
       请从【架构与接口契约】角度审阅这段代码：模块边界是否清晰、
       函数契约是否自洽、依赖方向是否单向、跨模块耦合是否最小、
       抽象层级是否一致、是否存在泄漏的抽象。
     prefix: "G"
-    # T-89（2026-10-17）：gemini.google.com 当日发送链故障（点击/Enter 零请求、
-    # 与 tab 可见性耦合的静默失败，多路取证未闭环），用户拍板当日不试。
-    # 临时停用，站点恢复后改回 true 并回归验证。
-    # T-71 复现回归（2026-10-21）：用户实测 gemini 已恢复正常（当日 5 席全在线、
-    # 5 席均能正常回复），停用前提消失 → 恢复 enabled: true 并纳入本轮 scan 实测。
+    # 2026-11-14：恢复可用接入；前提为 CDP 浏览器出口 JP/TW/KR/SG 非香港且账号可用。
+    # 选择器做多兜底（Gemini DOM/语言易变）。
     enabled: true
-    editor_selector: '.ql-editor[contenteditable="true"]'
-    submit_selector: 'button[aria-label="发送"]'
+    editor_selector: 'rich-textarea .ql-editor[contenteditable="true"], .ql-editor[contenteditable="true"], div[contenteditable="true"][aria-label*="Gemini"], div[contenteditable="true"][aria-label*="prompt"], [role="textbox"][contenteditable="true"]'
+    submit_selector: 'button[aria-label*="Send"], button[aria-label*="发送"], button.send-button, button[mattooltip*="Send"], button[data-test-id="send-button"]'
     editor_kind: "contenteditable"
-    # T-217（2026-10-28）：默认 response_selector=body 会连编辑器里刚注入的 prompt 一起抓，
-    # 造成"抓到自己的提问"假成功（T-217 web-seat 实证）。gemini 回复容器=model-response。
-    response_selector: 'model-response'
-    # generating_selector 实测后回填真实值（不猜）；见 archive/evidence/T-208/seat-cards.md
-    generating_selector: null
+    # T-394 A3 (2026-11-16): 与 qwen 同口径，避免 Gemini 思考 >60s 触发 waitComplete 默认 fast_fail 误杀
+    fast_fail_ms: 120000
+    required_stable: 12
+    poll_interval_ms: 150
+    response_selector: 'model-response, message-content .model-response-text, .model-response-text, message-content, .response-container-content'
+    generating_selector: 'button[aria-label*="Stop"], button[aria-label*="停止"]'
     upload_strategy: "direct"
-    # T-89（2026-10-17 实证）：skip_fresh_chat:true 复用脏会话（V8 旧会话）时，
-    # 旧 model-response 在新回复到达前即满足 waitForResponse 稳定窗 → 950 字旧回复
-    # 被当成本轮结果（round-1 29c93600 gemini 假成功）。改 fresh-chat 从根上消除
-    # 陈旧捕获面；模型选择 "Gemini 自动" 为默认档，导航不损失选择。
     skip_fresh_chat: false
     file_input_selector: 'input[type="file"]'
-    upload_button_selector: '[aria-label="上传和工具"]'
+    upload_button_selector: 'button[aria-label*="Upload"], button[aria-label*="上传"], button[aria-label*="Add"]'
     upload_menu_item_text: "从设备上传"
     upload_wait_ms: 3000
 
@@ -76,7 +70,7 @@ reviewers_role:
     # T-62 补（2026-10-14 实测）：deepseek 新 UI 用 .ds-markdown 渲染消息（108 命中），
     # model-response/.markdown 等默认选择器全部 0 —— 不配则 lastText 通道全瞎，
     # 提前返回判 false 空转到超时天花板并触发 regen 重复发送（用户实测两遍同答）。
-    response_selector: "div.ds-markdown"
+    response_selector: "div.ds-markdown.ds-assistant-message-main-content"
     editor_selector: 'textarea[placeholder="Message DeepSeek"]'
     submit_selector: '[role="button"].ds-button--circle.ds-button--primary'
     editor_kind: "textarea"
@@ -106,6 +100,15 @@ reviewers_role:
     submit_selector: 'button.send-button'
     editor_kind: "textarea"
     generating_selector: null
+    # T-394 A1 (2026-11-16): seat-exec/runSeat need these fields; qwen section previously lacked them ->
+    # waitComplete fell back to the DeepSeek default selector -> zero matches on chat.qwen.ai ->
+    # elsLen stuck at 0, sawNew stuck at false -> 120s FAIL_FAST misfire. Selectors per QWEN_SEAT (adapters/web-seat.mjs, T-253 verified).
+    response_selector: 'div.response-message-content'
+    busy_selector: 'button.stop-button'
+    response_aggregate: true
+    required_stable: 40
+    poll_interval_ms: 150
+    fast_fail_ms: 120000  # T-390 Step B: Qwen 首 token 可能 >60s（实测 bubble 在 60s 后才出现），fast-fail 前移 120s
     # T-208 1.9：drag → direct（截图坐标拖拽是 T-158 八连败根因；DOM.setFileInputFiles 直传待 1.11c 实测）
     upload_strategy: "direct"
     file_input_selector: 'input[type="file"]'
@@ -150,19 +153,54 @@ reviewers_role:
     prefix: "C"
     enabled: true
     editor_selector: '[contenteditable="true"].ProseMirror'
-    # 与 architect 段对齐：不设 submit_selector，走 testid send-button 兜底链（T-62 生产验证）
-    submit_selector: null
+    # T-20261111 复盘：chatgpt.com 新版 composer——空态不渲染发送按钮；composer 非空时出现
+    # `button[type="submit"][aria-label="Send"]`（英文）/ `button[aria-label="发送"]`（中文）；点击即发送+编辑器清空（已实测）。
+    # 旧行为：send_mode=enter 假成功（编辑器残留未发送、waitGeneric 抓到别的回复）——Enter 路径废弃。
+    submit_selector: 'button[aria-label="Send"], button[aria-label="发送"], button[type="submit"][aria-label="Send"], button[type="submit"][aria-label="发送"]'
     editor_kind: "contenteditable"
-    generating_selector: null
-    # T-208 1.9：无发送按钮 → 走 Enter 键发送（Input.dispatchKeyEvent），Enter 被吞时 web-seat 回退点击
-    send_mode: "enter"
-    response_selector: "main"
+    generating_selector: 'button[aria-label="Stop"], button[aria-label="停止"]'
+    send_mode: "click"  # T-390 Step C 曾判 enter；2026-11-17 实测 enter 也静默失败（enter_not_cleared，消息零送达）→ 回到 click（waitForSubmitReady+编辑器清空双重校验）
+    response_selector: '[data-content-search-unit-key$=":assistant"] [class*="--entity-prose-inset"]'
     upload_strategy: "direct"
     file_input_selector: 'input[type="file"]'
     upload_button_selector: null
     upload_menu_item_text: null
     upload_wait_ms: 3000
     role: consultant
+    # T-395 (2026-11-16): chatgpt 在「只输出 JSON」指令下稳定吐裸 JSON 动作（T-394 A2 实测）；
+    # action_only=true 时整条回复 trim 后恰为单个 JSON 对象且通过 allowlist+schema 校验才执行；
+    # URL 字符串解包 [text](url) -> url；标签路径不受影响；闸/围栏不变。
+    action_only: true
+
+  # 2026-11-15 T-386：Muse 席上岗（与本地席同级，能力见 SEAT_CAPABILITIES.muse）。
+  # 选择器与 orchestrator/adapters/web-seat.mjs 的 MUSE_SEAT 常量同源（T-366/T-368 实测），勿单独漂移。
+  - name: muse
+    display_name: "Muse"
+    url_match: "muse\\.ai"
+    url_open: "https://muse.ai/"
+    perspective: "通用协作席——读代码/改代码/跑测试（2026-11-15 T-386 上岗，本地席同级）"
+    perspective_prompt: |
+      请按任务要求独立执行：读代码、改代码、跑测试，最后给出结论。
+    prefix: "M"
+    enabled: true
+    editor_selector: 'textarea[aria-label="Message"], textarea[aria-label="消息"], textarea[aria-label="信息"], textarea[placeholder="Message"], textarea[placeholder="消息"]'
+    editor_kind: "textarea"
+    submit_selector: 'button[aria-label="Send"], button[aria-label="发送"]'
+    send_mode: "click"
+    response_selector: '[data-message-role="assistant"]'
+    response_aggregate: true
+    required_stable: 20
+    poll_interval_ms: 150
+    generating_selector: 'button[aria-label="Stop"], button[aria-label="停止"]'
+    busy_selector: 'button[aria-label="Stop"], button[aria-label="停止"]'
+    response_max_ms: 900000
+    upload_strategy: "direct"
+    file_input_selector: 'input[type="file"].sr-only'
+    upload_button_selector: null
+    upload_menu_item_text: null
+    upload_wait_ms: 3000
+    history_user_selector: '[data-message-role="user"]'
+    history_assistant_selector: '[data-message-role="assistant"]'
 
 # ============ MODE_B: 代码扫描模式（8-9 模型并行扫描）===========
 # 适用场景：代码扫描/修复 —— 8-9 模型并行扫描同一文件

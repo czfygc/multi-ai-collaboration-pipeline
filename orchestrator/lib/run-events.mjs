@@ -41,6 +41,8 @@ export const EVENT_TYPES = Object.freeze({
   WRITE_BLOCKED: 'write.blocked',
   WRITE_OVERRIDE: 'write.override',
   GATE_DENIED: 'gate.denied',
+  // T-255：headless 证据收据外部锚——文件自记哈希=自证可伪造，必须账本锚（§7.2.4）
+  EVIDENCE_RECEIPT: 'evidence.receipt',
 });
 
 const SECRET_KEY_RE = /(pass|passwd|password|secret|token|api[_-]?key|apikey|credential|private[_-]?key|authorization)/i;

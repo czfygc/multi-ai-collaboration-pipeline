@@ -25,6 +25,10 @@ export const CONFIG = {
 };
 
 export function coreRoot() {
+	// Tests point this at a scratch directory. Without the override the core
+	// tests would rewrite the REAL CORE.md that every client auto-loads (T-293:
+	// a selftest write was visible to the whole session mid-run).
+	if (process.env.TITAN_CORE_DIR) return process.env.TITAN_CORE_DIR.split('/').join('\\');
 	const ws = (process.env.TITAN_WORKSPACE || process.cwd()).split('/').join('\\');
 	return path.join(ws, 'titan-memory', 'core');
 }

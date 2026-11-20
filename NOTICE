@@ -10,12 +10,14 @@ Third-party components included as runtime dependencies:
 @playwright/mcp@0.0.83 MIT
 playwright-core@1.64.0 Apache-2.0
 js-yaml@5.4.3 MIT
+chrome-remote-interface@0.34.0 MIT
 
 Upstream projects:
 
 - @playwright/mcp — Microsoft Corporation — https://github.com/microsoft/playwright-mcp
 - playwright-core — Microsoft Corporation — https://github.com/microsoft/playwright
 - js-yaml — https://github.com/nodeca/js-yaml
+- chrome-remote-interface — GoogleChrome / ChromeDevTools — https://github.com/ChromeDevTools/chrome-remote-interface
 
 This project itself is licensed under the Apache License, Version 2.0.
 See the LICENSE file for the full text.

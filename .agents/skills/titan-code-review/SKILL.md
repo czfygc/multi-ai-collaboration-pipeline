@@ -1,6 +1,6 @@
 ---
 name: titan-code-review
-description: "【评审复核】评审分支、PR 或未完成改动：双轴并排报告 —— 规范轴（AGENTS.md + 仓库约定 + Fowler 异味）与规格轴（台账任务 + 设计稿），不重排、不越权改代码。触发词：评审 / 复查改动 / 能不能合 / review"
+description: "【评审复核】评审分支/PR/未完成改动：规范轴与规格轴并排，不重排不越权改码。触发词：评审 / 复查改动 / 能不能合 / review"
 version: 1.1.0
 requires: none
 tests: "manual: 拿一个真实 diff 跑双轴评审并核对 Standards 与 Spec 两侧结论"
@@ -118,9 +118,30 @@ TITAN 硬检查项（两轴之外，必须单列并给出证据）：
 
 另附 TITAN 硬检查项结果（逐项 PASS/FAIL/证据）。
 
+### 6. 反驳即确认（refuter-per-finding，T-255 M5）
+
+任何 finding 上报前，先由**发现方自己**走一遍反驳——不是等作者来反驳（对齐 dsh-review 的 refuter-per-finding 与 tri-sages 反批准机制）：
+
+1. **构造反例**：这个 finding 有没有合法解释 / 别的读法？找反例 / 复核证据。
+2. **复核证据**：结论引用的命令/文件/提交真的存在且支持这个结论吗（实际 read 输出 / 重跑命令）？
+3. **反驳失败才上报 confirmed**；反驳成功 → 降级为"提示"或撤回，不许凑数上报。
+
+**升级为阻塞（blocker）的门槛**：重大发现须 ≥2 个**独立锚**（文件 / 命令），
+单锚（只有一句话 / 只有印象）不得升级为阻塞——对齐 T-255 声明分级：引用级证据（REFERENCED）不支撑阻塞这种 firsthand 级裁定。
+
 ## 为什么必须分两轴
 
 - 规范全对但做错了东西 → **Standards 过，Spec 挂**。
 - 完全按规格做但破坏仓库约定 → **Spec 过，Standards 挂**。
 
 合并排序会让一轴掩盖另一轴。M2 的最终验收仍由**非作者**客户端执行，本技能不改变验收权归属。
+
+## T-363 实测：复核 agent 测试产出的三条反向校验（2026-11-11）
+
+先打 agent 最常见的收尾伎俩，再看断言是不是真断言。三条全部来自实战，不是教科书：
+
+1. **BUG-AS-EXPECTED（把 bug 写成期望并报 Fixed）**：agent 面对待修 bug 时，会断言当前行为为“正确”，报告里再标 FIXED。识别法：断言若背对 issue 原文表述（“should X but currently Y”），即此症；xfail(strict=True, reason=“ISSUE-ID”) 才是合法落位。验收话术：凡报告出现 FIXED 字样，必须能逐字对上 issue 的验收口径或维护者评论；对不上即 FAIL。
+2. **MOCK-ABOVE-BUG-LAYER（打桩高了一层）**：bug 的原文发生在 A 层（解析/传输层），agent 在 B 层（CLI 直连的方法层）打桩，测试永远绿、什么也没测。识别法：顺着“缺陷描述里的文件/函数”往下读——bug 不在被打桩处即旁路。落位策略：找不到正确层 = xfail(strict) + 报告写明“该层不可达”，禁标 FIXED。
+3. **VACUOUS-INNER-ASSERT（xfail 兜底下的空断言）**：strict xfail 下内层写 `assert x == <常量>`（如 float==float 恒真）毫无意义。规则：xfail 只允许一个断言路径从失败态翻成期望态，内层断言必须能“区分对错”（如对空值/枚举逐态验证）。
+
+辅助一条：**`# FIXED`/`fixed` 结论要给证据坐标**（文件:行/命令输出哈希），否则驳回。

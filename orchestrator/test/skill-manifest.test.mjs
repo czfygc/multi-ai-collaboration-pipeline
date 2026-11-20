@@ -182,13 +182,22 @@ test('verify：一致则 ok；技能内容变了则报不一致', () => {
   }
 });
 
-test('仓内真实技能：manifest 覆盖全部技能且与磁盘一致', () => {
+test('仓内真实技能：manifest 覆盖全部技能且与磁盘一致', async () => {
   const m = readManifest(DEFAULT_MANIFEST_PATH);
   assert.ok(m, '仓内 manifest 不存在（先跑 node orchestrator/skill-manifest.mjs apply）');
   // T-183（2026-10-22 技能整合）：21 → 15（同族合并 + 删纯别名），下限随之下调；
   // 仍保留护栏：低于 15 说明技能被误删，要查。
   assert.ok(m.skills.length >= 15, '技能数异常: ' + m.skills.length);
-  const v = verifyManifest({ manifestPath: DEFAULT_MANIFEST_PATH, skillsRoot: DEFAULT_SKILLS_ROOT });
+  // 反竞态（T-294 实测）：pre-commit-manifest.test.mjs 会在真实 skills 目录短暂创建
+  // t258-probe 夹具；node --test 并行时本断言会把它当"未进 manifest 的新技能"误报。
+  // 只对这一个已知夹具目录重试一次（300ms 窗口）；其它任何差异仍然直接 FAIL。
+  const verifyOnce = () => verifyManifest({ manifestPath: DEFAULT_MANIFEST_PATH, skillsRoot: DEFAULT_SKILLS_ROOT });
+  let v = verifyOnce();
+  // 最多等 3s（并行夹具窗口实测 ~1.6s）；只在"差异里含 t258-probe"时重试，其它差异立即 FAIL。
+  for (let i = 0; i < 15 && !v.ok && v.issues.some((x) => /t258-probe/.test(x)); i++) {
+    await new Promise((r) => setTimeout(r, 200));
+    v = verifyOnce();
+  }
   assert.equal(v.ok, true, JSON.stringify(v.issues));
 });
 

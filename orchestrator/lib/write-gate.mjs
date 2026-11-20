@@ -26,6 +26,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { atomicWriteFileSync } from './atomic-write.mjs';
 import { basename, join, relative, resolve, isAbsolute, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createLedger, newRunId } from './run-events.mjs';
@@ -64,7 +65,11 @@ export function classifyTarget(path, { repoRoot = REPO_ROOT, publishTree = readP
   const name = basename(abs);
   if (CONSTITUTION_FILES.has(name)) return { category: 'constitution', rule: '宪法文件: ' + name, path: abs };
   if (LEDGER_FILES.has(name)) return { category: 'ledger', rule: '台账/限额文件: ' + name, path: abs };
-  if (name === 'titan_secrets.env' || (name.endsWith('.env') && name !== '.env')) {
+  // T-352：registry.d/*.json（含 _meta.json）按 ledger 高风险处置
+  const posixPath = abs.replace(/\\/g, '/').toLowerCase();
+  if (/\/registry\.d\/[^/]+\.json$/.test(posixPath)) return { category: 'ledger', rule: '台账分片文件: ' + name, path: abs };
+  // P1-06: 任意 `.env` / `.env.*` / `*.env` 一律按密钥文件判（此前 `.env` 被显式放行成 normal）
+  if (name === 'titan_secrets.env' || /\.env($|\.)/.test(name)) {
     return { category: 'secrets', rule: '密钥文件: ' + name, path: abs };
   }
   if (publishTree && inside(abs, publishTree)) return { category: 'publish-tree', rule: '发布树内文件', path: abs };
@@ -305,7 +310,7 @@ export function createGate({ root, repoRoot = REPO_ROOT } = {}) {
         const content = readFileSync(t.stage_file);
         const actual = sha256(content);
         if (t.post_sha256 && actual !== t.post_sha256) throw new Error('暂存内容哈希不符，拒绝落盘: ' + t.rel);
-        writeFileSync(t.path, content);
+        atomicWriteFileSync(t.path, content);
         applied.push(t.rel);
       }
     } else {

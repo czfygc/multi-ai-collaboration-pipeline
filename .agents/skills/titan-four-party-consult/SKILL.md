@@ -1,6 +1,6 @@
 ---
 name: titan-four-party-consult
-description: "【评审复核】4 会诊 / 多方独立复核：两种模式——①管道模式（Gemini/DeepSeek/Qwen 走 CDP 审 artifact + ChatGPT 做 Architect）②复杂问题 4 席同题交叉审问（deepseek/qwen/gemini/chatgpt 四网页席一次全问）。无损保留原始发现、检测冲突与盲区，产出决策输入（作者用完汇总）。触发词：4 会诊 / 四方会诊 / 交叉审问 / cross-examine / multi-review / cross-model review / 复杂问题问四家"
+description: "【评审复核】4 会诊/多方独立复核：管道模式或 4 席同题交叉审问，产出决策输入。触发词：4 会诊 / 交叉审问 / multi-review / 复杂问题问四家"
 user-invocable: true
 model-invocable: true
 version: 1.1.0
@@ -153,6 +153,18 @@ Severity thresholds configurable via reviewers.yaml → thresholds:
 - BLIND_SPOT + MEDIUM/LOW → backlog, NOT delta
 - SINGLE_REVIEWER + MEDIUM/LOW → backlog, NOT delta
 - This prevents the architect from being flooded with minor single-reviewer noise.
+
+### Refuter-per-finding（T-255 M5，反驳即确认）
+
+任何 finding 从"发现"走向 DELTA/阻塞前，先由检查方自己走一遍反驳（对齐 dsh-review refuter-per-finding 与 tri-sages 反批准机制）：
+
+1. **构造反例**：该 proposition 有无合法解释 / 其它读法？
+2. **复核证据**：引用的 artifact 行/命令/文件真实存在且支持该结论吗（对原 artifact 重算 SHA256 / 重跑命令）？
+3. **反驳失败才保留**；反驳成功 → 降级或撤回，不许凑数进 DELTA。
+
+**升级为阻塞的门槛**：重大发现须 ≥2 个**独立锚**（文件 / 命令），单锚（只有一句话/印象）不得升级为阻塞；
+与 T-255 声明分级一致——引用级证据（REFERENCED）不支撑"阻塞"这种 firsthand 级裁定。
+Layer B 的 HIGH_SEVERITY_UNCONFIRMED / BLIND_SPOT 进入 DELTA 前必须过本关（在 delta 条目 Same-fact verification 段写明反驳过程与锚数）。
 
 DELTA entry template:
 
@@ -448,3 +460,13 @@ Do NOT migrate historical files until STEP C passes. Then archive old `orchestra
 ## Cross-skill note
 
 Quantitative tool discipline remains governed by `titan-quant-tool-discipline`. When the reviewed artifact is a quant research output, that Skill governs adequate tool usage; this Skill governs how review is structured.
+
+## 审计注记：历史提交作者邮箱不可信（2026-11-18，T-401/T-402）
+
+2026-11-18 前本仓 git email 曾漂移为 `opencode@test`（规范值 `titan@archaeology.local`，已于 2026-11-18 修回）。**在此之前的所有提交，作者邮箱不可信**——不得用 git author 推断某条改动由哪个客户端/座席写入。
+
+多端/多座席池化复核（Kilo/Cline/OpenCode/网页席审 V8、T-398 类协作产物）时：
+- 归属判定一律用：台账 owner + `registry.d/` 分片 + ISSUE_REGISTRY.json 快照哈希链 + 提交 diff 内容。
+- 禁止用 git author 邮箱裁定「谁写了」、裁定某端有无失职、或据此否定他端工作。
+- 出现归属争议时：回读分片与提交体，必要时 `git show --stat` + 台账；不要用 `git log --format='%ae'` 作裁定依据。
+- 入库：2026-11-18（共享记忆 `5f71e2b1-3c77-42f1-b36f-205951590de0`）。

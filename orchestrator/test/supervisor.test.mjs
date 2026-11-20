@@ -11,6 +11,7 @@ import {
   runDaemon, taskExists, installScheduledTask, uninstallScheduledTask, summarizeState,
   acquireDaemonLock, releaseDaemonLock,
   DEFAULT_TASK_NAME, ENV_ALLOWLIST,
+  computeBackoffMs, probePort, DEFAULT_MAX_BACKOFF_MS,
 } from '../lib/supervisor.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
@@ -133,7 +134,7 @@ test('守护循环：真实子进程被拉起并写心跳状态（不依赖假 s
     const jobsPath = join(dir, 'jobs.json');
     const statePath = join(dir, 'state.json');
     writeJobs([normalizeJob({ id: 'alive', command: [process.execPath, '-e', 'setInterval(()=>{},1000)'], restart: 'never' })], jobsPath);
-    const res = await runDaemon({ jobsPath, statePath, tickMs: 50, maxTicks: 2, ledger: null });
+    const res = await runDaemon({ jobsPath, statePath, alertsPath: join(dir, 'alerts.jsonl'), tickMs: 50, maxTicks: 2, ledger: null });
     assert.ok(res.ticks >= 1);
     const state = readState(statePath);
     assert.equal(state.jobs.alive.status, 'running');
@@ -150,7 +151,7 @@ test('守护循环：daemon 不在清单里的 job 会被杀掉并从状态移�
     const jobsPath = join(dir, 'jobs.json');
     const statePath = join(dir, 'state.json');
     writeJobs([normalizeJob({ id: 'tmp', command: [process.execPath, '-e', 'setInterval(()=>{},1000)'], restart: 'never' })], jobsPath);
-    const promise = runDaemon({ jobsPath, statePath, tickMs: 30, maxTicks: 50, ledger: null });
+    const promise = runDaemon({ jobsPath, statePath, alertsPath: join(dir, 'alerts.jsonl'), tickMs: 30, maxTicks: 50, ledger: null });
     await new Promise((r) => setTimeout(r, 120));
     writeJobs([], jobsPath);
     await promise;
@@ -208,6 +209,130 @@ test('状态摘要可读；状态文件原子写盘', () => {
   }
 });
 
+// ─────────────────────────── T-389：backoff 封顶 + 端口预检 ───────────────────────────
+
+test('T-389 computeBackoffMs：指数退避在 max_backoff_ms 处封顶，不再涨到以天计', () => {
+  const job = { backoff_ms: 2000, max_backoff_ms: 60000 };
+  assert.equal(computeBackoffMs(job, 1), 2000, '第 1 次 = base');
+  assert.equal(computeBackoffMs(job, 2), 4000);
+  assert.equal(computeBackoffMs(job, 6), 60000, '2^5*2000 = 64000 应被封顶到 60000');
+  assert.equal(computeBackoffMs(job, 16), 60000, 'restarts=16 原为 18.2h，必须封顶');
+  assert.equal(computeBackoffMs(job, 19), 60000, 'restarts=19 原为约 6 天，必须封顶');
+});
+
+test('T-389 computeBackoffMs：缺省上限 = DEFAULT_MAX_BACKOFF_MS（5 分钟）', () => {
+  assert.equal(DEFAULT_MAX_BACKOFF_MS, 5 * 60 * 1000);
+  const job = { backoff_ms: 2000 };
+  assert.equal(computeBackoffMs(job, 1), 2000);
+  assert.equal(computeBackoffMs(job, 20), DEFAULT_MAX_BACKOFF_MS);
+  // 极端指数也不许出现 Infinity / NaN
+  assert.ok(Number.isFinite(computeBackoffMs(job, 500)));
+  assert.ok(Number.isFinite(computeBackoffMs(job, 100000)));
+});
+
+test('T-389 normalizeJob：max_backoff_ms 校验 + port 校验', () => {
+  const j = normalizeJob({ id: 'x', command: ['node'], backoff_ms: 1000, max_backoff_ms: 30000, port: 3081 });
+  assert.equal(j.max_backoff_ms, 30000);
+  assert.equal(j.port, 3081);
+  // 未给 port 时归一为 null，避免 undefined 落盘
+  assert.equal(normalizeJob({ id: 'y', command: ['node'] }).port, null);
+  assert.equal(normalizeJob({ id: 'z', command: ['node'] }).max_backoff_ms, DEFAULT_MAX_BACKOFF_MS);
+  assert.throws(() => normalizeJob({ id: 'x', command: ['node'], backoff_ms: 5000, max_backoff_ms: 1000 }), /不得小于 backoff_ms/);
+  assert.throws(() => normalizeJob({ id: 'x', command: ['node'], port: 0 }), /port 必须是 1-65535/);
+  assert.throws(() => normalizeJob({ id: 'x', command: ['node'], port: 70000 }), /port 必须是 1-65535/);
+  assert.throws(() => normalizeJob({ id: 'x', command: ['node'], max_backoff_ms: -1 }), /max_backoff_ms/);
+});
+
+test('T-389 probePort：空闲端口判未占用；真实监听端口判占用', async () => {
+  const net = await import('node:net');
+  // 1) 找一个当前空闲端口：监听 0 让系统分配，然后立刻关闭。
+  const srv0 = net.createServer();
+  await new Promise((r) => srv0.listen(0, '127.0.0.1', r));
+  const freePort = srv0.address().port;
+  await new Promise((r) => srv0.close(r));
+  const free = await probePort(freePort, { timeoutMs: 500 });
+  assert.equal(free.listening, false, '刚释放的端口应判为未占用');
+
+  // 2) 真实监听 → 判占用
+  const srv = net.createServer();
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const busyPort = srv.address().port;
+  try {
+    const busy = await probePort(busyPort, { timeoutMs: 500 });
+    assert.equal(busy.listening, true, '在听的端口必须判为占用');
+  } finally {
+    await new Promise((r) => srv.close(r));
+  }
+});
+
+test('T-389 守护循环：端口被占用时不 spawn，记 port_conflict + alert；端口释放后恢复拉起', async () => {
+  const dir = tmpDir();
+  try {
+    const jobsPath = join(dir, 'jobs.json');
+    const statePath = join(dir, 'state.json');
+    const alertsPath = join(dir, 'alerts.jsonl');
+    let busy = true;
+    writeJobs([normalizeJob({ id: 'listen', command: ['fake'], restart: 'always', max_restarts: 5, backoff_ms: 0, port: 3081 })], jobsPath);
+    const { fn, spawned } = fakeSpawner({ fake: { exitCode: null } });
+    const fakeProbe = async () => ({ listening: busy, reason: busy ? 'connected' : 'ECONNREFUSED' });
+    const fakeOwner = () => (busy ? 4242 : null);
+
+    const promise = runDaemon({
+      jobsPath, statePath, alertsPath, tickMs: 20, maxTicks: 4, spawnFn: fn, ledger: null,
+      portProbe: fakeProbe, portOwner: fakeOwner,
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(spawned.length, 0, '端口被占用时绝不 spawn（避免必然的 EADDRINUSE）');
+    busy = false;
+    await promise;
+
+    const state = readState(statePath);
+    assert.equal(spawned.length >= 1, true, '端口释放后应恢复拉起');
+    assert.ok(existsSync(alertsPath), '应写 alert 文件');
+    const alerts = readFileSync(alertsPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    const conflictAlerts = alerts.filter((a) => a.kind === 'port_conflict');
+    assert.equal(conflictAlerts.length, 1, '同一占用者只告警一次（不每 tick 刷屏），实际 ' + conflictAlerts.length);
+    assert.equal(conflictAlerts[0].port, 3081);
+    assert.equal(conflictAlerts[0].owner_pid, 4242);
+    assert.ok(state.jobs.listen, '状态里应仍有该 job');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('T-389 守护循环：退避被封顶时写 backoff_capped alert', async () => {
+  const dir = tmpDir();
+  try {
+    const jobsPath = join(dir, 'jobs.json');
+    const statePath = join(dir, 'state.json');
+    const alertsPath = join(dir, 'alerts.jsonl');
+    writeJobs([normalizeJob({ id: 'crash', command: ['bad'], restart: 'always', max_restarts: 20, backoff_ms: 1, max_backoff_ms: 4 })], jobsPath);
+    const { fn } = fakeSpawner({ bad: { exitCode: 1 } });
+    await runDaemon({ jobsPath, statePath, alertsPath, tickMs: 5, maxTicks: 60, spawnFn: fn, ledger: null });
+    const alerts = readFileSync(alertsPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    const capped = alerts.filter((a) => a.kind === 'backoff_capped');
+    assert.ok(capped.length >= 1, '封顶必须有痕迹，实际 0 条');
+    assert.ok(capped.every((a) => a.delay_ms <= 4), '封顶后 delay 不得超过 max_backoff_ms');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('T-389 CLI：add 支持 --port / --max-backoff-ms', () => {
+  const dir = tmpDir();
+  try {
+    const jobsPath = join(dir, 'jobs.json');
+    const r = spawnSync(process.execPath, [CLI, 'add', 'pjob', '--', 'node', 'x.mjs',
+      '--port', '3081', '--max-backoff-ms', '30000', '--jobs', jobsPath], { cwd: REPO_ROOT, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    const j = readJobs(jobsPath).find((x) => x.id === 'pjob');
+    assert.equal(j.port, 3081);
+    assert.equal(j.max_backoff_ms, 30000);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('CLI：--help 退 0；add/list 往返（临时清单）', () => {
   const help = spawnSync(process.execPath, [CLI, '--help'], { cwd: REPO_ROOT, encoding: 'utf8' });
   assert.equal(help.status, 0);
@@ -225,4 +350,38 @@ test('CLI：--help 退 0；add/list 往返（临时清单）', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('acquireDaemonLock: stale lock + pid reused by non-node process must be reclaimed (2026-11-16 chrome reused pid=4176)', () => {
+  const dir = tmpDir();
+  try {
+    const lockPath = join(dir, 'daemon.lock');
+    const staleIso = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    writeFileSync(lockPath, JSON.stringify({ version: 'v1', pid: process.pid, started_at: staleIso, heartbeat_at: staleIso, token: 't' }), 'utf8');
+    const r = acquireDaemonLock({ lockPath, pid: process.pid + 1, isNodePid: () => false });
+    assert.equal(r.ok, true, 'stale lock with alive non-node pid (reused) must be reclaimed');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('acquireDaemonLock: stale lock with alive node pid must still refuse (stuck node daemon)', () => {
+  const dir = tmpDir();
+  try {
+    const lockPath = join(dir, 'daemon.lock');
+    const staleIso = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    writeFileSync(lockPath, JSON.stringify({ version: 'v1', pid: process.pid, started_at: staleIso, heartbeat_at: staleIso, token: 't' }), 'utf8');
+    const r = acquireDaemonLock({ lockPath, pid: process.pid + 1, isNodePid: () => true });
+    assert.equal(r.ok, false, 'stale lock with alive node pid must be refused');
+    assert.equal(r.pid, process.pid);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('acquireDaemonLock: fresh lock refuses even when pid is non-node (heartbeat within 30s = live lock)', () => {
+  const dir = tmpDir();
+  try {
+    const lockPath = join(dir, 'daemon.lock');
+    const freshIso = new Date().toISOString();
+    writeFileSync(lockPath, JSON.stringify({ version: 'v1', pid: process.pid, started_at: freshIso, heartbeat_at: freshIso, token: 't' }), 'utf8');
+    const r = acquireDaemonLock({ lockPath, pid: process.pid + 1, isNodePid: () => false });
+    assert.equal(r.ok, false, 'fresh lock must be refused regardless of pid identity');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

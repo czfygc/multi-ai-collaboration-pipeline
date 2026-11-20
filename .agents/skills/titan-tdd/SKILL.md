@@ -1,6 +1,6 @@
 ---
 name: titan-tdd
-description: "【开发测试】TDD 红绿重构：先确认接缝、每次一条竖切片、测试落 orchestrator/test/ 并登记 SUITES.md、每个修复提交都带回归测试；含「跑测试只看结构化结论」速读（自动识别 vitest/jest/pytest/node:test/npm test）。触发词：TDD / 红绿重构 / 先写测试 / 加回归测试 / 跑测试 / 测试失败"
+description: "【开发测试】TDD 红绿重构：一条竖切片、测试落 orchestrator/test/、修复提交带回归测试。触发词：TDD / 红绿重构 / 先写测试 / 加回归测试 / 跑测试"
 version: 1.1.0
 requires: node
 tests: "manual: 走一次红绿重构并确认测试已进 SUITES.md"
@@ -42,6 +42,22 @@ provenance: adapted:mattpocock/skills#unversioned-MIT
 - 新增/变更公开接口时，先和用户确认接缝（M6：给 2-3 个选项 + 推荐）。
 - 测试选点优先级：关键路径 > 复杂逻辑 > 边界情况。不可能全覆盖，别假装能。
 
+## 测试隔离（血泪条款，T-293）
+
+**测试永远不许写真实数据。** 三档隔离，从强到弱：
+
+| 档 | 做法 | 适用 |
+|---|---|---|
+| ① 根本写不到 | 被测代码支持根目录覆盖（如 `TITAN_MEMORY_FILE` / `TITAN_CORE_DIR`），测试指向 `os.tmpdir()` 下的临时副本 | **首选**；凡是被四端自动读取的文件（宪法、CORE.md、客户端配置） |
+| ② 可恢复 | 写前备份、`finally` 里字节还原 | 只在无法加覆盖参数时的退路 |
+| ③ 事后清理 | 只删自己写入的行，并断言基线数量不变 | 最低档，必须配"上次中断也能自愈"的启动清理 |
+
+三条配套硬规矩：
+
+1. **"写坏再还原"不是隔离，只是止损**。CORE.md 被 selftest 覆盖时，整个会话的系统提示真的闪出过 `# selftest core` —— 还原兜底存在**可见窗口**，别人会读到脏数据。
+2. **测试要假设上次是异常中断的**：启动时先自清本测试专属标记（如 `titan-mcp-selftest` tag）的残留，否则一次管道截断就会污染真实库（实测 218→222）。
+3. **别用会截断 stdout 的管道跑测试**（`| Select-Object -Last N` 会提前关闭管道杀掉进程），重定向到文件再读；否则 `finally` 跑不完。
+
 ## 循环规则
 
 - **红在绿前**：先让测试因正确的原因失败，贴出失败输出作为证据（M2）。
@@ -53,7 +69,7 @@ provenance: adapted:mattpocock/skills#unversioned-MIT
 
 1. **位置**：`orchestrator/test/<模块>.test.mjs`；用 `node:test` + `node:assert/strict`，零外部依赖。
 2. **登记**：新测试文件必须加进 `orchestrator/test/SUITES.md` 的表格（Suite / 文件 / 覆盖）。
-3. **跑法**：`node --test orchestrator/test/<文件>`；全量 `node --test orchestrator/test/`；闸门 `node orchestrator/verify-gate.mjs` 的 ④ 段会自动跑全量。
+3. **跑法**：`node --test orchestrator/test/<文件>`；全量用 `$files = Get-ChildItem orchestrator/test -Recurse -Filter '*.test.mjs' -ExpandProperty FullName; node --test @files`（**直接传目录会 ENOENT**）；闸门 `node orchestrator/verify-gate.mjs` 的 ④ 段会自动跑全量。
 4. **临时目录**：`mkdtempSync(join(tmpdir(), 'prefix-'))`，`finally` 里 `rmSync(dir, { recursive: true, force: true })`，不污染仓库。
 5. **确定性**：不依赖当前时间、随机数、网络、机器语言环境；需要时先播种/冻结输入。
 6. **密钥**：fixture 里不放真实 token（M5）；日志类输入先脱敏。

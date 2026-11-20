@@ -31,7 +31,14 @@ const REPO_ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const once = argv.includes('--once');
 const dryRun = argv.includes('--dry-run');
 const includeMetered = argv.includes('--include-metered');
-const intervalHours = Math.max(0.25, Number(flagValue('--interval-hours') || 2));
+// P1-08: 非法 --interval-hours 显式拒绝（此前 Math.max(0.25,NaN)=NaN → 1ms 循环 + 假写 updated_at）
+const _rawIntervalH = flagValue('--interval-hours');
+const _parsedIntervalH = Number(_rawIntervalH || 2);
+if (_rawIntervalH !== null && (!Number.isFinite(_parsedIntervalH) || _parsedIntervalH <= 0)) {
+  console.error('[HEALTH-REFRESH] 非法 --interval-hours: ' + JSON.stringify(_rawIntervalH));
+  process.exit(2);
+}
+const intervalHours = Math.max(0.25, _parsedIntervalH);
 const statePath = resolve(flagValue('--state') || join(REPO_ROOT, 'orchestrator', 'run-events', 'supervisor', 'model-health-refresh.json'));
 // --tiers <path>：注入分档表（T-192 发抖治理：测试/演练用夹具，不依赖活 model-tiers.json）
 const tiersPath = flagValue('--tiers');
@@ -106,7 +113,12 @@ if (isMain) {
   let n = 0;
   for (;;) {
     n += 1;
-    await tick(n);
+    try {
+      await tick(n);
+    } catch (e) {
+      // P1-08 伴生: 单次 tick 未捕获异常不得杀死整个刷新器
+      console.error('[HEALTH-REFRESH] tick ' + n + ' 未捕获异常（继续）: ' + String((e && e.message) || e).slice(0, 300));
+    }
     if (once || dryRun) break;
     const sleepMs = intervalHours * 3600 * 1000;
     console.log('[HEALTH-REFRESH] 下轮在 ' + intervalHours + ' 小时后（' + n + '）');

@@ -56,4 +56,4 @@ Keep discussions friendly and fact-based; disagreements are resolved by verifica
 
 ---
 
-*This document is the public-facing summary of the `AGENTS.md` four-client collaboration rules; internal registry details (`ISSUE_REGISTRY.json`, `OPEN_SOURCE_PREP_PLAN.md`) are not expanded here.*
+*This document is the public-facing summary of the `AGENTS.md` four-client collaboration rules; internal registry details (`ISSUE_REGISTRY.json`) are not expanded here.*

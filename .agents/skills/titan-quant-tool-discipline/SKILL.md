@@ -1,8 +1,8 @@
 ---
 name: titan-quant-tool-discipline
-description: "【量化】量化研究工具选型纪律：专用工具优先、点时一致性/样本质量/滚动 OOS/交易成本/Deflated Sharpe/参数敏感性；保留 UNKNOWN 并说明回退限制。触发词：量化 / 回测 / 因子 / IC / Sharpe"
+description: "【量化】量化选型纪律：点时一致/OOS/成本/Deflated Sharpe/参数敏感性。触发词：量化 / 回测 / 因子 / IC / Sharpe"
 user-invocable: true
-version: 1.1.0
+version: 1.2.0
 requires: quant-mcp
 tests: "manual: 对一个点位检查题走专用工具优先流程"
 provenance: original
@@ -137,6 +137,18 @@ A tool result does not:
 - convert absence of evidence into evidence of absence.
 
 If the applicable tool cannot establish the requested property, preserve `UNKNOWN` or `insufficient evidence` rather than inferring success. This discipline does not alter P0, P1-A, T1 sealed status, `UNKNOWN`, OI/FUNDING gates, FORWARD gates, `PHASE_2` gates, or V8 status.
+
+## 实验与 A/B 统计纪律（移植自 dsh-flash-presets v0.2.8 实测，MIT © LarryE135，2026-11）
+
+量化或任何 A/B 对比结论，先过这条纪律再写进报告：
+
+1. **配对 log 检验 + 符号检验 + p95** 三件套；重尾题 **n≥5**；统计前**剔离群**（实测：剔除 O08 后 treat 反贵 21%）。
+2. **t<2 不写进结论**（相关/主效应先过显著性门槛）。
+3. **最小可检比值 1.85–2.43**：臂间差异 <2 倍测不出，不许给"没有差异"式结论。
+4. **A/B 金丝雀**：跑批前断言两臂配置真的不同（作者踩过两次）。
+5. **超上限不抽样**：宁报"结果过多"也不给失真样本。
+6. **撤回留档不删**：被否决候选/已撤回说法单独成节归档（candidates/archive/），留档而非删除。
+7. 单臂抖动（3.8–15.1M）常大于臂间差异——先看臂内方差，再谈效应量。
 
 ## Pre-use check
 

@@ -115,6 +115,15 @@ async function runOne(cdp, seat, prompt, args) {
       rec.readyWaitMs = Date.now() - t1;
       if (!ready) { rec.status = 'editor_not_ready'; rec.error = 'editor_not_ready:' + (rec.navError || 'timeout'); rec.latencyMs = Date.now() - t0; return rec; }
     }
+    let baselineText = '';
+    try {
+      const rb = await cdp.send('Runtime.evaluate', {
+        expression: `(() => { const els = document.querySelectorAll(${JSON.stringify(seat.response_selector || 'body')}); if (!els.length) return ''; const el = els[els.length - 1]; return String((el.innerText !== undefined ? el.innerText : el.textContent) || '').trim(); })()`,
+        returnByValue: true,
+      }, sid);
+      baselineText = String((rb && rb.result && rb.result.value) || '');
+    } catch { /* baseline 失败不致命：退化为无基线（旧行为） */ }
+    rec.baselineLen = baselineText.length;
     const inj = await ws.injectBySelector(cdp, sid, seat.editor_selector, prompt, seat.editor_kind || 'textarea');
     rec.inject = inj;
     if (!inj.ok) { rec.status = 'inject_failed'; rec.error = 'inject:' + (inj.reason || 'unknown'); rec.latencyMs = Date.now() - t0; return rec; }
@@ -125,12 +134,20 @@ async function runOne(cdp, seat, prompt, args) {
     }
     const sub = await ws.submit(cdp, sid, seat);
     rec.submit = sub;
+    if (!sub.ok) {
+      // 发送未确认时不许进入等待：旧答案会让 waitGeneric 误报成功（T-342 E2E 实证）。
+      rec.status = 'send_failed';
+      rec.error = 'send:' + (sub.reason || 'unknown');
+      rec.latencyMs = Date.now() - t0;
+      return rec;
+    }
     const w = await ws.waitGeneric(cdp, sid, {
       selector: seat.response_selector || 'body',
       timeoutMs: args.timeout * 1000,
       stableRounds: 3,
       intervalMs: 1500,
-      minLen: 10,
+      minLen: 4,   // 2026-11-11：短回复（如 PONG）也要算数；baseline 差分 + stableRounds 仍兜底
+      baseline: baselineText,
     });
     rec.wait = { ok: w.ok, ms: w.ms, polls: w.polls, reason: w.reason || null, lastLen: w.lastLen ?? null };
     rec.text = w.text;

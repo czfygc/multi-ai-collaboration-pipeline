@@ -24,6 +24,10 @@ test('目标分类：宪法 / 台账 / 密钥 / 发布树 / 普通', () => {
     [join(repo, 'ISSUE_REGISTRY.json'), 'ledger'],
     [join(repo, 'orchestrator', 'limits.json'), 'ledger'],
     [join(repo, 'titan_secrets.env'), 'secrets'],
+    [join(repo, '.env'), 'secrets'],
+    [join(repo, '.env.local'), 'secrets'],
+    [join(repo, '.env.production'), 'secrets'],
+    [join(repo, 'config', 'staging.env'), 'secrets'],
     [join(pub, 'README.md'), 'publish-tree'],
     [join(repo, 'orchestrator', 'run-gate.mjs'), 'normal'],
   ];

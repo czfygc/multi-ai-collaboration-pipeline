@@ -17,14 +17,17 @@
 //   plan              只打印将复制的文件与 sha256 前后值（不写任何文件）
 //   apply --yes       复制待同步文件（字节级 + sha256 校验）→ 更新两侧标记 → 提交发布树
 //                     （--push 才推送；--no-commit 只落盘不提交）
-//   verify            重算发布树指纹，与账本对比，报告漂移与账本一致性
+//   verify            重算发布树指纹，与账本对比，报告漂移与账本一致性（含锚点可达性自检）
 //   init              初始化/刷新账本（记录当前发布树指纹 + 当前本地 source commit）
+//   repair [--yes]    账本锚点损坏时，按发布树文件内容字节匹配重推断；不带 --yes 只打印候选与对账明细
+//   （--tolerance N   允许不匹配文件数，默认 1：同步当日的未提交运行态改动常见为 1）
 //
 // 安全护栏（发布是公开动作，护栏不能省）：
 //   - 只同步「发布树已跟踪的文件」+ 「显式 --include 的新文件」；不按目录猜测
 //   - 拒绝含密钥特征的文件/内容（titan_secrets.env、*.pem、AIza/ghp_/sk-/Bearer/PRIVATE KEY 等）
 //   - 复制后逐文件 sha256 校验，不一致即报错回滚该文件
 //   - 默认不推送（push 需显式 --push）
+//   - 账本锚点（lastSync.sourceCommit）在任何写入点强制校验可达，坏值拒写（fail-closed）
 import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, copyFileSync, readdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, resolve, dirname, relative, sep } from 'node:path';
@@ -172,6 +175,37 @@ function git(cwd, args, allowFail = false) {
   }
 }
 
+// 二进制安全的 git 输出（字节原样返回，不做 utf8 解码）
+function gitBuf(cwd, args, allowFail = false, input) {
+  try {
+    return execFileSync('git', args, { cwd, maxBuffer: 64 * 1024 * 1024, input });
+  } catch (e) {
+    if (allowFail) return null;
+    throw new Error('git ' + args.join(' ') + ' failed: ' + String(e.stderr || e.message).trim());
+  }
+}
+
+/** 锚点是否在本仓可达（存在且为 commit 对象）。坏值/空串/相对引用一律 false。 */
+export function isCommitReachable(localRoot, commit) {
+  const c = String(commit || '').trim();
+  if (!/^[0-9a-f]{4,64}$/i.test(c)) return false;   // 拒绝 'HEAD'、'x..HEAD'、注入式参数
+  try {
+    execFileSync('git', ['cat-file', '-e', c + '^{commit}'], { cwd: localRoot, stdio: 'pipe' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 锚点不可达即抛错（fail-closed）：任何写账本点必须先过这道闸 */
+export function assertCommitReachable(localRoot, commit, label = '账本锚点') {
+  const c = String(commit || '').trim();
+  if (!isCommitReachable(localRoot, c)) {
+    throw new Error(label + '不可达：' + (c || '(空)') + ' —— 本仓不存在该提交。跑 node orchestrator/publish-sync.mjs repair 推断修复，不要手改 PUBLISH_SYNC.json。');
+  }
+  return c;
+}
+
 /** 发布树已跟踪的文件（发布集 = 已跟踪集合，不猜测） */
 export function listPublishedFiles(pubDir) {
   const out = git(pubDir, ['ls-files', '-z']);
@@ -257,6 +291,61 @@ export function inferSourceCommit(localRoot, pubDir) {
   return c || '';
 }
 
+/**
+ * 按内容字节匹配推断「发布树对应的本地提交」（repair 用）。
+ * 对每个候选提交解析 ls-tree 得到全部 blob id，与发布树文件按 blob id 比对——
+ * 二进制安全、无需 checkout、不受 utf8 解码影响（PUBLISH_MAP 感知：AGENTS.md 比对 docs/publish/AGENTS.md）。
+ * 语义：取「得分最高且提交最旧」的提交——宁可把锚点往前推（diff 范围偏大、新候选可见性偏大），
+ * 也不把锚点往后推（会无声吃掉「发布时尚未入库的新文件」候选）。
+ * 返回 { best, score, total, unmatched[], walked, truncated }；best='' 表示无匹配提交。
+ */
+export function findSourceCommitByContent(localRoot, pubDir, files, opts = {}) {
+  const maxRevs = Number(opts.maxRevs) || 5000;
+  // 发布树 → 本地来源路径；发布树里缺失的文件不计分
+  const want = [];
+  for (const f of files) {
+    const pp = join(pubDir, f);
+    if (!existsSync(pp)) continue;
+    const localPath = sourceOf(f);
+    const buf = gitBuf(localRoot, ['hash-object', '--stdin'], false, readFileSync(pp));
+    if (buf) want.push({ pub: f, local: localPath, blob: buf.toString('utf8').trim() });
+  }
+  if (!want.length) return { best: '', score: 0, total: 0, unmatched: [], walked: 0, truncated: false };
+  function treeOf(rev) {
+    const treeRaw = gitBuf(localRoot, ['ls-tree', '-r', '-z', rev], true);
+    const blobByPath = new Map();
+    if (treeRaw) {
+      for (const entry of treeRaw.toString('utf8').split('\0')) {
+        if (!entry) continue;
+        const tab = entry.indexOf('\t');
+        if (tab < 0) continue;
+        const meta = entry.slice(0, tab).split(' ');
+        if (meta.length < 3 || meta[1] !== 'blob') continue;
+        blobByPath.set(entry.slice(tab + 1), meta[2]);
+      }
+    }
+    return blobByPath;
+  }
+  const revs = git(localRoot, ['rev-list', 'HEAD', '--max-count=' + maxRevs], true).split('\n').filter(Boolean);
+  let best = { rev: '', score: -1 };
+  let walked = 0;
+  for (const rev of revs) {
+    walked++;
+    const blobByPath = treeOf(rev);
+    let score = 0;
+    for (const w of want) if (blobByPath.get(w.local) === w.blob) score++;
+    if (score >= best.score) best = { rev, score };   // 同分取更旧（rev-list 由新到旧）
+  }
+  let unmatched = [];
+  if (best.rev) {
+    const blobByPath = treeOf(best.rev);
+    unmatched = want.filter((w) => blobByPath.get(w.local) !== w.blob).map((w) => w.pub);
+  } else {
+    unmatched = want.map((w) => w.pub);
+  }
+  return { best: best.rev, score: Math.max(0, best.score), total: want.length, unmatched, walked, truncated: revs.length >= maxRevs };
+}
+
 // ------------------------------------------------------------------ 账本读写
 
 export function ledgerPath(localRoot = LOCAL_ROOT) {
@@ -270,6 +359,9 @@ export function readLedger(localRoot = LOCAL_ROOT) {
 }
 
 export function writeLedger(localRoot, ledger) {
+  const sc = ledger && ledger.lastSync && ledger.lastSync.sourceCommit;
+  // fail-closed：锚点必须在本仓可达，否则拒写（宁停不写死锚点）
+  if (sc) assertCommitReachable(localRoot, sc, '账本锚点');
   const p = ledgerPath(localRoot);
   writeFileSync(p, JSON.stringify(ledger, null, 2) + '\n', 'utf8');
   return p;
@@ -292,7 +384,8 @@ function buildLedger(localRoot, pubDir, includeFiles, sourceCommit, sourceInferr
       publishedCommit: git(pubDir, ['rev-parse', 'HEAD'], true),
       publishedFiles: fp.fileCount,
       publishedFingerprint: fp.sha256,
-      sourceCommit: sourceCommit || git(localRoot, ['rev-parse', 'HEAD'], true),
+      // 空 fallback 会写出「坏锚点」；fail-closed：不可达即抛错，宁停不写死值
+      sourceCommit: assertCommitReachable(localRoot, sourceCommit || git(localRoot, ['rev-parse', 'HEAD'], true), '账本锚点'),
       sourceCommitInferred: !!sourceInferred,
       sourceFiles: includeFiles.length
     },
@@ -305,6 +398,24 @@ function buildLedger(localRoot, pubDir, includeFiles, sourceCommit, sourceInferr
     }
   }
   return base;
+}
+
+// 解析「本次可用的对比锚点」：账本锚点坏值绝不传给 git diff/rev-list（会 fatal 泄漏 + 静默 0 结果）。
+// 返回 { anchor, broken, raw }：broken=true 表示账本锚点本仓不可达（status/plan 只告警；apply 拒写）。
+function resolveLedgerAnchor(localRoot, ledger, pubDir) {
+  const raw = (ledger && ledger.lastSync && ledger.lastSync.sourceCommit) || '';
+  if (raw) {
+    if (isCommitReachable(localRoot, raw)) return { anchor: raw, broken: false, raw };
+    return { anchor: '', broken: true, raw };
+  }
+  const inferred = inferSourceCommit(localRoot, pubDir);
+  const ok = inferred && isCommitReachable(localRoot, inferred) ? inferred : '';
+  return { anchor: ok, broken: false, raw: '' };
+}
+
+function anchorBrokenNote(raw) {
+  return '[账本损坏] 来源提交 ' + String(raw).slice(0, 12) + ' 在本仓不存在（历次锚点 4bf76783/8c221de0/9a0ef04/5312824e 曾全部为此坏死值）。\n'
+    + '           新候选计算已跳过；先跑 node orchestrator/publish-sync.mjs repair 查看修复方案，加 --yes 落盘。';
 }
 
 // ------------------------------------------------------------------ 命令实现
@@ -326,7 +437,9 @@ function cmdStatus(opts) {
   }
   const publishedFiles = listPublishedFiles(pubDir);
   const fp = fingerprint(pubDir, publishedFiles);
-  const srcCommit = (ledger && ledger.lastSync && ledger.lastSync.sourceCommit) || inferSourceCommit(localRoot, pubDir);
+  const anchorRes = resolveLedgerAnchor(localRoot, ledger, pubDir);
+  const srcCommit = anchorRes.anchor;
+  if (anchorRes.broken) printHeader([anchorBrokenNote(anchorRes.raw)]);
   const drift = computeDrift(localRoot, pubDir, publishedFiles, opts.include, srcCommit);
   const localHead = git(localRoot, ['rev-parse', 'HEAD'], true);
   const pubHead = git(pubDir, ['rev-parse', 'HEAD'], true);
@@ -346,14 +459,16 @@ function cmdStatus(opts) {
       '账本锚点    : ' + LEDGER_NAME,
       '  上次同步  : ' + (l.at || '(未记录)'),
       '  发布提交  : ' + String(l.publishedCommit || '').slice(0, 12),
-      '  来源提交  : ' + String(l.sourceCommit || '').slice(0, 12) + (l.sourceCommitInferred ? ' (按任务号推断)' : ''),
+      '  来源提交  : ' + String(l.sourceCommit || '').slice(0, 12) + (l.sourceCommitInferred ? ' (推断)' : '') + (!l.sourceCommit ? '' : (anchorRes.broken ? ' ← 本仓不存在！' : '')),
       '  记录指纹  : ' + String(l.publishedFingerprint || '').slice(0, 16) + '…',
       '  当前指纹  : ' + fp.sha256.slice(0, 16) + '…  ' + (l.publishedFingerprint === fp.sha256 ? '一致（发布树未被手工改动）' : '不一致 → 发布树被手工改过，需人工确认')
     ]);
-    if (l.sourceCommit && localHead !== l.sourceCommit) {
+    if (l.sourceCommit && !anchorRes.broken && localHead !== l.sourceCommit) {
       const cnt = git(localRoot, ['rev-list', '--count', l.sourceCommit + '..HEAD'], true);
       const log = git(localRoot, ['log', '--oneline', '-8', l.sourceCommit + '..HEAD'], true);
       printHeader(['  未发布本地提交: ' + (cnt || '?') + ' 个' + (log ? '\n    ' + log.split('\n').join('\n    ') : '')]);
+    } else if (anchorRes.broken) {
+      printHeader(['  未发布本地提交: 无法统计（锚点坏值已隔离，未传给 git）']);
     }
   } else {
     const inferred = inferSourceCommit(localRoot, pubDir);
@@ -368,7 +483,7 @@ function cmdStatus(opts) {
     '待同步      : 改动 ' + changedFiles.length + ' 个 / 新增候选 ' + drift.candidates.length + ' 个 / 显式指定 ' + drift.explicit.length + ' 个'
   ]);
   for (const f of changedFiles.slice(0, 40)) console.log('  [改] ' + f);
-  if (changedFiles.length > 40) console.log('  ... 共 ' + changedFiles.length + ' 个');
+  if (changedFiles.length > 40) console.log('  ... 合计 ' + changedFiles.length + ' 个');
   for (const f of drift.candidates) console.log('  [新] ' + f + '   (需 --include 才会发布)');
   for (const f of drift.explicit) console.log('  [含] ' + f + '   (显式指定)');
   if (drift.changedDenied.length) {
@@ -392,7 +507,9 @@ function cmdPlan(opts) {
   if (!pubDir) { console.log('[FAIL] 未指定发布树：--tree <路径> / init 建账本 / PUBLISH_TREE 环境变量。'); return 2; }
   if (!existsSync(pubDir)) { console.log('[FAIL] 发布树不存在: ' + pubDir); return 2; }
   const publishedFiles = listPublishedFiles(pubDir);
-  const srcCommit = (ledger && ledger.lastSync && ledger.lastSync.sourceCommit) || inferSourceCommit(localRoot, pubDir);
+  const anchorRes = resolveLedgerAnchor(localRoot, ledger, pubDir);
+  const srcCommit = anchorRes.anchor;
+  if (anchorRes.broken) console.log(anchorBrokenNote(anchorRes.raw));
   const drift = computeDrift(localRoot, pubDir, publishedFiles, opts.include, srcCommit);
   const deniedExplicit = drift.explicit.filter((f) => isNeverPublish(f));
   const allowedExplicit = drift.explicit.filter((f) => !isNeverPublish(f));
@@ -438,8 +555,15 @@ function cmdApply(opts) {
     console.log('[DRY-RUN] 未带 --yes，不做任何写入。先跑 plan 看清单：');
     return cmdPlan(opts);
   }
+  // fail-closed：账本锚点坏值时拒绝任何写入（宁停不猜；先跑 repair）
+  const planAnchor = resolveLedgerAnchor(localRoot, ledger, pubDir);
+  if (planAnchor.broken) {
+    console.log('[FAIL] 账本锚点不可用，apply 已拒绝。');
+    console.log(anchorBrokenNote(planAnchor.raw));
+    return 2;
+  }
   const publishedFiles = listPublishedFiles(pubDir);
-  const srcCommit = (ledger && ledger.lastSync && ledger.lastSync.sourceCommit) || inferSourceCommit(localRoot, pubDir);
+  const srcCommit = planAnchor.anchor;
   const drift = computeDrift(localRoot, pubDir, publishedFiles, opts.include, srcCommit);
   const allowedExplicit = drift.explicit.filter((f) => !isNeverPublish(f));
   const deniedExplicit = drift.explicit.filter((f) => isNeverPublish(f));
@@ -568,6 +692,8 @@ function cmdVerify(opts) {
   console.log('  当前指纹 : ' + fp.sha256);
   if (!ledger) { console.log('  账本     : 缺失（跑 init 建立）'); return 1; }
   const l = ledger.lastSync || {};
+  const anchorOk = l.sourceCommit ? isCommitReachable(localRoot, l.sourceCommit) : false;
+  console.log('  锚点可达 : ' + (l.sourceCommit ? (anchorOk ? '✓ ' + String(l.sourceCommit).slice(0, 12) : '✗ 本仓不存在 ' + String(l.sourceCommit).slice(0, 12) + '（先跑 repair）') : '(未记录)'));
   console.log('  账本指纹 : ' + String(l.publishedFingerprint || '(无)'));
   const ok = l.publishedFingerprint === fp.sha256;
   console.log('  结论     : ' + (ok ? '一致 ✓' : '不一致 ✗（发布树在上次同步后被改动过）'));
@@ -578,7 +704,7 @@ function cmdVerify(opts) {
   } else {
     console.log('  发布树清单: 缺失（下一次 apply 会生成）');
   }
-  return ok ? 0 : 1;
+  return (ok && anchorOk) ? 0 : 1;
 }
 
 function cmdInit(opts) {
@@ -590,6 +716,16 @@ function cmdInit(opts) {
   const files = listPublishedFiles(pubDir);
   const inferred = inferSourceCommit(localRoot, pubDir);
   const srcCommit = opts.sourceCommit || inferred;
+  // fail-closed：显式/推断的锚点都必须可达，否则拒写（坏值进不了账本）
+  if (srcCommit && !isCommitReachable(localRoot, srcCommit)) {
+    console.log('[FAIL] 来源提交 ' + String(srcCommit).slice(0, 12) + ' 在本仓不存在，init 已拒绝（账本未写入）。');
+    console.log('       显式值请核对拼写；推断值请先跑 repair 查看对账明细。');
+    return 2;
+  }
+  if (opts.sourceCommit && srcCommit !== git(localRoot, ['rev-parse', 'HEAD'], true)) {
+    console.log('[WARN] 显式 --source-commit (' + srcCommit.slice(0, 12) + ') 与当前 HEAD 不同——账本将记录该值；');
+    console.log('       status 的「未发布本地提交」统计从该值起算。确认无误可继续。');
+  }
   const drift = computeDrift(localRoot, pubDir, files, [], srcCommit);
   const ledger = buildLedger(localRoot, pubDir, files, srcCommit, !opts.sourceCommit);
   ledger.backlogAtInit = {
@@ -611,10 +747,68 @@ function cmdInit(opts) {
   return 0;
 }
 
+// 账本锚点损坏的修复：按内容字节匹配重推断（不依赖任务号/手工录入）。
+// 安全：默认 dry-run（只打印），--yes 才写账本；不匹配数超容许值直接拒绝；不执行任何 git 写操作。
+function cmdRepair(opts) {
+  const localRoot = LOCAL_ROOT;
+  const ledger = readLedger(localRoot);
+  if (!ledger) { console.log('[FAIL] 没有 ' + LEDGER_NAME + '，无需 repair（跑 init 建立）。'); return 2; }
+  const pubDir = resolveTree(opts, ledger);
+  if (!pubDir) { console.log('[FAIL] 未指定发布树：--tree <路径> / PUBLISH_TREE 环境变量。'); return 2; }
+  if (!existsSync(pubDir)) { console.log('[FAIL] 发布树不存在: ' + pubDir); return 2; }
+  const raw = (ledger.lastSync && ledger.lastSync.sourceCommit) || '';
+  if (raw && isCommitReachable(localRoot, raw)) {
+    console.log('[OK] 账本锚点 ' + raw.slice(0, 12) + ' 本仓可达，无需 repair。');
+    return 0;
+  }
+  // 对账文件集：优先账本记录的「上次同步文件清单」（≤十几个，最快且最贴近同步时刻），否则发布树全部已跟踪文件
+  const synced = Array.isArray(ledger.lastSync && ledger.lastSync.syncedFileList) ? ledger.lastSync.syncedFileList : null;
+  const tracked = listPublishedFiles(pubDir);
+  const trackedSet = new Set(tracked);
+  const files = (synced && synced.length ? synced : tracked).filter((f) => trackedSet.has(f) || existsSync(join(pubDir, f)));
+  if (!files.length) { console.log('[FAIL] 没有可用于对账的文件（账本清单与发布树均为空）。'); return 1; }
+  const tolerance = opts.tolerance === undefined ? 1 : Number(opts.tolerance);
+  console.log('=== 锚点内容匹配推断 ===');
+  console.log('  损坏锚点: ' + (raw || '(未记录)'));
+  console.log('  对账文件: ' + files.length + ' 个（' + (synced && synced.length ? '账本记录的上次同步清单' : '发布树全部已跟踪文件') + '，容许不匹配 ' + tolerance + ' 个）');
+  const res = findSourceCommitByContent(localRoot, pubDir, files, { maxRevs: opts.maxRevs || 5000 });
+  console.log('  本仓提交: 扫描 ' + res.walked + ' 个' + (res.truncated ? '（已达 maxRevs 上限）' : ''));
+  console.log('  最佳匹配: ' + (res.best ? res.best.slice(0, 12) : '(无)') + '  匹配 ' + res.score + '/' + res.total + ' 个文件');
+  for (const u of res.unmatched) console.log('    [不匹配] ' + u);
+  const unmatchedN = res.total - res.score;
+  if (!res.best || unmatchedN > tolerance) {
+    console.log('[FAIL] 无法可靠推断（不匹配 ' + unmatchedN + ' 个 > 容许 ' + tolerance + ' 个），账本未改动。');
+    console.log('       确认同步时有更多未入库运行态改动时，用 --tolerance <数> 放宽后重跑（仍需 --yes 才落盘）。');
+    return 1;
+  }
+  const when = git(localRoot, ['show', '-s', '--format=%ci %s', res.best], true);
+  console.log('  对应提交: ' + when);
+  console.log('  语义提示: 推断锚点取「匹配数最高且最旧」的提交——宁可 diff 范围偏大（新候选可见性大），不把锚点推后');
+  if (!opts.yes) {
+    console.log('[DRY-RUN] 不带 --yes，未写账本。确认无误后加 --yes 落盘。');
+    return 0;
+  }
+  const repair = {
+    at: new Date().toISOString(),
+    from: raw || '(未记录)',
+    to: res.best,
+    matched: res.score,
+    total: res.total,
+    method: 'content-match',
+    evidence: 'archive/evidence/repair-publish-anchor-20261114.md'
+  };
+  const newLedger = { ...ledger, lastSync: { ...(ledger.lastSync || {}), sourceCommit: res.best, sourceCommitInferred: true, repair } };
+  newLedger.note = (ledger.note ? ledger.note + ' | ' : '') + 'repair(' + repair.at.slice(0, 10) + ')：锚点按发布树内容字节匹配重推断 ' + repair.matched + '/' + repair.total + '，详 ' + repair.evidence;
+  writeLedger(localRoot, newLedger);
+  console.log('[已修复] ' + LEDGER_NAME + ' 锚点 → ' + res.best.slice(0, 12));
+  console.log('         建议随后跑 node orchestrator/publish-sync.mjs status 核对未发布提交数。');
+  return 0;
+}
+
 // ------------------------------------------------------------------ 入口
 
 function parseArgs(argv) {
-  const opts = { include: [], yes: false, push: false, noCommit: false, tree: '', msg: '' };
+  const opts = { include: [], yes: false, push: false, noCommit: false, tree: '', msg: '', tolerance: undefined, maxRevs: 5000 };
   const rest = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -622,6 +816,8 @@ function parseArgs(argv) {
     else if (a === '--tree') { opts.tree = String(argv[++i] || ''); }
     else if (a === '--source-commit') { opts.sourceCommit = String(argv[++i] || ''); }
     else if (a === '--msg') { opts.msg = String(argv[++i] || ''); }
+    else if (a === '--tolerance') { opts.tolerance = Number(argv[++i]); }
+    else if (a === '--max-revs') { opts.maxRevs = Number(argv[++i]) || 5000; }
     else if (a === '--yes') opts.yes = true;
     else if (a === '--push') opts.push = true;
     else if (a === '--no-commit') opts.noCommit = true;
@@ -638,8 +834,9 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import
   else if (cmd === 'apply') code = cmdApply(opts);
   else if (cmd === 'verify') code = cmdVerify(opts);
   else if (cmd === 'init') code = cmdInit(opts);
+  else if (cmd === 'repair') code = cmdRepair(opts);
   else {
-    console.log('用法: node orchestrator/publish-sync.mjs [status|plan|apply|verify|init] [--include a,b] [--tree 路径] [--yes] [--push] [--no-commit] [--msg "..."]');
+    console.log('用法: node orchestrator/publish-sync.mjs [status|plan|apply|verify|init|repair] [--include a,b] [--tree 路径] [--yes] [--push] [--no-commit] [--msg "..."] [--tolerance N] [--max-revs N]');
     code = 2;
   }
   process.exit(code);

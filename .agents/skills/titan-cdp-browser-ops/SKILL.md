@@ -1,7 +1,7 @@
 ---
 name: titan-cdp-browser-ops
-description: "【浏览器】操作本机 CDP 浏览器（127.0.0.1:9222）驱动网页：多步向导与表单、API 优先原则、截图取证、坑库（SPA/React/OAuth/DigitalPlat）与安全红线。触发词：浏览器操作 / CDP / 注册账号 / 多步向导 / 填表"
-version: 1.1.0
+description: "【浏览器】用 CDP（127.0.0.1:9222）驱动网页：多步向导、填表、截图取证、安全红线。触发词：浏览器操作 / CDP / 注册账号 / 填表"
+version: 1.2.0
 requires: node, cdp-browser-9222, playwright-core
 tests: "manual: 用 cdp-drv.mjs 开一个标签页并回读标题"
 provenance: original
@@ -112,6 +112,12 @@ PUT    /json/activate/<targetId>   # 前台切换
 - **密钥回填表单走 `tmp/inject-secret.mjs`**（base64 → env/文件通道 → 页面内 atob）；**禁止**把密钥明文拼进 eval 表达式/命令行（E2：密码含 `"`、`[`、`|` 拼 JS 必炸，字节通道是唯一安全解）。
 - 令牌一次性展示必须**当场 DOM 捕获**；后续消息/报告不回显完整值。
 - 浏览器自动化前向用户报告操作对象（哪个账号/哪个页面）；用户在场可随时请求人工代点（混合模式）。
+- **原语最小化**：只用 §2 已封装的几个原语（list / new / close / eval / nav / shot + MCP `browser_*`），不临时手搓裸 CDP 调用；需要新能力先补进 `tmp/cdp-drv.mjs` 再复用。
+- **有后果操作先确认**：删域名 / 删 zone / 改 NS / 改结算 / 对外发消息等不可逆或对外可见动作，先报「对象 + 动作 + 影响」等用户确认再动手（与上一条「动生产账号前报告清楚操作对象」同一红线）。
+- **频率限制（同站换路 ≤5 次）**：同一站点连续重试/换选择器 5 次仍失败即停手换路——改走 API（§0）、改脚本或请用户人工，不无限重试（与 §12 上传重试 3→2 次同源）。
+- **不碰金融与隐私**：不代用户支付/转账/下单/提现、不碰结算与钱包页；不读取或导出身份证/银行卡/密码/私钥页面内容；凭据类只走本段前两条的字节通道，且不进日志与报告。
+- **不批量下载**：不做整站抓取或批量拉素材，只在任务必要范围内取单页/单文件并留证。
+- 来源：报表 `archive/mining-report-4sources.md:202`（P2-③ 浏览器自动化安全边界）五项边界对齐 dafeiyu-browser 的设计思路；本段为原创措辞改写，不含第三方代码。
 
 ## 8. 网页席操作与诊断（四方会诊/8方查错/交叉审问共用）
 
@@ -204,3 +210,26 @@ PUT    /json/activate/<targetId>   # 前台切换
 - 更新方式：改本 SKILL.md → git commit（`[fix] 技能更新：<摘要>`）。新技能建 `.agents/skills/<name>/SKILL.md`（YAML frontmatter 格式与本文件一致）。
 - 完整实战源档：`.agents/skills/titan-cdp-browser-ops/浏览器操作实例-20261011-Cline.md`（C1-C5/S1-S6/CF1-5/DP1-6/E1-3 原始编号在此，SKILL.md 已按主题归并）。
 - 本技能由 opencode 会话创建（2026-10-11，kdns.fr 落地会话全实录）；2026-10-12 T-58 升级为操作枢纽（工具链 v2 + 席位操作 + OAuth/DP 章节）。
+
+## 15. B 站投稿模式库（2026-11-18，花果山_成片实测，T-402 链路旁证）
+
+- 登录态：persistent profile 保留；首页右上角有头像即已登录，不必在 prompt 里登录。
+- 视频上传：目标控件是 .bcc-upload-wrapper > input[type=file]（隐藏），不是 name=buploader 那个隐藏控件。用 locator('.bcc-upload-wrapper input').first().setInputFiles 传文件；Playwright 有 50MB 上限，超限先把视频重编码到 <50MB（libx264 -crf 23 -c:a aac -b:a 160k 足够；本例 68MB -> 35.8MB）。
+- 必填项（漏一个 B 站就拦）：标题（默认吃文件名，手工改）、创作声明（AI 合成必选 含AI生成内容）、分区（自动映射到 影视 时核对）、标签（逐个回车创建，最多 8 个）、封面（点 添加封面，上传 input[accept="image/png, image/jpeg"]，视频帧截图即可，16:9 与 4:3 都会展示给观众）、简介（2000 字内）。
+- 发布验证：个人空间页（投稿数 1→2、新片排最前）即可确认上架；截图存档 bili_submit_success.png。
+- 合规红线：AI 合成声明是 B 站硬要求；副标题禁暗链/擦边/原著 IP 照搬。
+## 16. 网页席注入排障：先探针后下诊断（2026-11-18 T-421 实证）
+
+触发：seat-exec / seat-loop 报 `inject_failed` / `waitComplete FAIL_FAST` / `hidden_or_zero_size` / `send_not_confirmed`。
+
+**三步探针（只读 Runtime.evaluate，零风险；先做完再改代码）**
+
+1. **编辑器清单**：`[...document.querySelectorAll('textarea, [contenteditable="true"], rich-textarea .ql-editor')]`，每项记 `{tag, cls, aria, rect, display, vis, opacity, focused, text.slice(0,60)}`。SPA 常见**僵尸双 DOM**：chatgpt.com 两个 `.ProseMirror`，一个 0×0 stale 排首匹配，一个可见聚焦——`querySelector` 首匹配 = 隐藏编辑器 → 注入静默落入 → `waitComplete` 60s FAIL_FAST。对策：改用「可见匹配优先」（T-421 `buildVisibleMatchJS`：querySelectorAll 逐个过滤 isConnected + display + visibility + opacity + width/height；无可见返回 null 走回退链），**不要**硬改 wait 逻辑。
+2. **发送按钮定位**：`[...document.querySelectorAll('button')]` 过滤 `/send|发送|发|arrow_upward|play_arrow/i`，记 `{aria-label, iconText, testid, disabled, 可见性}`。Gemini 实测发送按钮 `aria-label="发送"`，点击后 composer 不清空、模型不响应 → **对端不吸合成输入**（execCommand insertText / CDP Input.insertText 均实测无效；DOM 可见文本入窗但模型不消费）——这是对端行为，不是本地闸门问题，**不再试第三种注入路径**。
+3. **最小 PONG 实测**：注入「请回复 PONG。」→ 点发送 → 看 composer len 是否清空 + 最新 model 消息是否出现。不响应即判定对端受限，如实落 1888 UI 标签（`orchestrator/ui/console/page.mjs`，`读写测 · …`），不许虚美。
+
+**纪律**
+
+- 先探针后改代码；探针脚本放 `D:\tmp\Temp\opencode\`（在仓外允许写盘），会话用完清理。
+- 能力同级 ≠ 行为同级：chatgpt（3 种 prompt 均婉拒工具标签）、gemini（不吸合成输入）都是对端行为，不构成本地权限差；AGENTS.md 围栏一视同仁。
+- 改 selector 匹配策略后必须：`node --check` + 相关 web-seat 测试 + `verify-gate` + chatgpt/deepseek PONG 回归 + Kilo 只读 CV 复核（prompt 写明「禁止任何命令」；Kilo 偶尔仍跑 `git status/diff`，只读无害，记一笔即可）。

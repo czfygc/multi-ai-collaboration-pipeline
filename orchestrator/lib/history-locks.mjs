@@ -54,7 +54,8 @@ export async function registerDailyDispatch(channel) {
     mkdirSync(dir, { recursive: true });
     // acquire lock with timeout 500ms
     const lockTimeout = FILE_LOCK_TIMEOUT_MS;
-    if (!acquireLock(lockPath, lockTimeout)) {
+    // P1-02: acquireLock 是 async——缺 await 会把 Promise 当真值，fail-closed 锁直接失效
+    if (!(await acquireLock(lockPath, lockTimeout))) {
       return { ok: false, reason: '无法获取计数器文件锁，超时' };
     }
      try {
@@ -100,7 +101,7 @@ export function appendDispatchHistory(sha, dispatchId, timestamp, round, trig, m
    if (parent) fields.push('P=' + parent);
    const line = fields.join(' ');
    mkdirSync(dirname(DISPATCH_HISTORY_LOG), { recursive: true });
-   
+
    // 文件锁实现
    function acquireLock(lockPath, timeout) {
      const start = Date.now();
@@ -124,19 +125,19 @@ export function appendDispatchHistory(sha, dispatchId, timestamp, round, trig, m
      }
      return false;
    }
-   
+
    function releaseLock(lockPath) {
      // DELTA-022：ENOENT=良性；其余释放失败必须可见
      try { unlinkSync(lockPath); } catch (e) { if (e.code !== 'ENOENT') console.warn('[WARN] dispatch-history 锁释放失败: ' + e.message); }
    }
-   
+
    const lockPath = DISPATCH_HISTORY_LOG + '.lock';
    const lockTimeout = FILE_LOCK_TIMEOUT_MS; // 500ms timeout
-   
+
    if (!acquireLock(lockPath, lockTimeout)) {
      throw new Error('无法获取dispatch-history文件锁，超时');
    }
-   
+
    try {
      // 使用带时间戳和进程ID的唯一临时文件，避免并发冲突
      const uniqueTempLog = DISPATCH_HISTORY_LOG + '.tmp.' + Date.now() + '.' + Math.random().toString(36).substr(2, 9);
@@ -146,7 +147,7 @@ export function appendDispatchHistory(sha, dispatchId, timestamp, round, trig, m
    } finally {
      releaseLock(lockPath);
    }
-   
+
    return line;
 }
 

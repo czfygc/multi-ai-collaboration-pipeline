@@ -56,12 +56,14 @@ export function buildIntent({ intent, target = '', constraints = '', replyChanne
   };
 }
 
-// 落盘：reviews/_pending/intent-<ts>.json（ts = epoch 毫秒）
+// 落盘：reviews/_pending/intent-<ts><seq>.json（ts = epoch 毫秒，seq = 进程内自增，
+// 防同一毫秒多次写盘文件名碰撞互覆——T-255 修意图测试在并行负载下的同 ms 竞态）
+let _seq = 0;
 export function writeIntentFile(intentObj, { reviewsRoot = join(REPO_ROOT, 'reviews') } = {}) {
   const dir = join(reviewsRoot, '_pending');
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  const ts = Date.now();
-  const file = join(dir, 'intent-' + ts + '.json');
+  _seq += 1;
+  const file = join(dir, 'intent-' + Date.now() + String(_seq % 1000).padStart(3, '0') + '.json');
   writeFileSync(file, JSON.stringify(intentObj, null, 2), 'utf8');
   return file;
 }

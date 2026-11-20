@@ -1,6 +1,6 @@
 ---
 name: titan-registry-edit
-description: "【台账记忆】台账 ISSUE_REGISTRY.json 的新增/更新（必须走 edit-issue.mjs：自动 JSON 转义、逗号、括号、时间戳，并内置高风险写确认闸；提交前跑 pre-commit-check）；含跨会话持久记忆（memory_recall / memory_remember，事实/决定类）。触发词：登记任务 / 更新台账 / 改台账 / 做跨对话持久记忆 / 记住这个"
+description: "【台账记忆】改台账走 edit-issue.mjs（内置写确认闸）；含跨会话持久记忆。触发词：登记任务 / 更新台账 / 改台账 / 记住这个"
 user-invocable: true
 version: 1.1.0
 requires: node
@@ -47,10 +47,13 @@ node orchestrator/edit-issue.mjs `
 - `--status`（必填）：todo/claimed/in_progress/verifying/done/blocked
 - `--owner`（必填）：客户端名（opencode/cline/kilo/harness）
 - `--description`（必填）：条目说明
-- `--files`（可重复）：涉及的文件路径
+- `--files`（**非变参：必须逐条重复写 `--files A --files B`**；内部是 `flagAll('--files')`，写成 `--files A B C` 只会收下 A —— T-257 踩过）
+- `--fields-json <路径>`：精确回填；**不能单独用**（必须配 `--id`），且 JSON 里**不许含 `id` 字段**（否则报「不允许的字段: id」）
+- `--evidence '{"key":"path"}'`：证据路径必须真实存在，否则拒绝
 - `--branch`（可选，默认 `main`）
 - `--registry`（可选，默认 `ISSUE_REGISTRY.json`）
 - `--verifier`（可选，done 后填交叉验证者）
+- `--cv-verifier`（`--cv-status pass` 时必须 = 非作者客户端，如 kilo）：写 `cross_validation.verifier`，**不是** `--verifier`；T-363 首次误写成 `harness`（作者），已当场改正——不得把作者客户端记进任何验证字段，否则审计语义整个反转
 
 退出码：0=成功，1=运行时错误，2=参数错误，3=JSON 校验失败。
 
@@ -70,6 +73,22 @@ node orchestrator/run-gate.mjs apply   --proposal <proposal_id>
 ```
 
 闸门红线：落盘前会二次校验目标哈希——提案生成后台账被他人改过就拒写，必须重新提案。
+
+### 五个必踩的坑（2026-11-03 T-231/T-269/T-270 连续踩到，写进技能防复发）
+
+| 坑 | 现象（逐字） | 正确做法 |
+|---|---|---|
+| `--files` 是**覆盖**不是追加 | 第一次传 3 个文件，把条目原有 4 个 files 冲掉了 | 一次传**全量**、且重复传参 `--files a --files b --files c` |
+| 新建条目 `evidence_level` 默认 `unverified` | `[EDIT-ISSUE][CV-GATE] 拒绝: cv=pass 须配 evidence_level=firsthand，当…unverified` | 同一条命令里加 `--evidence-level firsthand`（也可后续单独补） |
+| `--evidence` 的 JSON 里含 `/` 或 `\` 的字符串会被当路径校验 | `[EDIT-ISSUE][EVIDENCE-GATE] 拒绝: 证据文件不存在: <那段文字>` | 描述性文字**禁用斜杠**（写「jk-002 日本」不写 `jk-002(JP)`；写「type=https 加 server 加 path」不写 `type=https+server+path`） |
+| 台账 `issues` 是**对象**不是数组 | `r.issues.filter is not a function` / `arr.find is not a function` | 取单条 `r.issues['T-270']`；遍历 `Object.values(r.issues)` |
+| `done` 必须带 CV，否则整闸红 | verify-gate「done无CV闸」列 ID 并 FAIL | 先把 `--cv-status/--cv-verifier/--cv-evidence` 填好再标 `--status done`；`cv=pass` 还要求 verifier ≠ owner、证据不在 `tmp/`、证据首部含 `# client=` `# code=0` `# timedOut=false` `# prompt_sha256=`（或全文有 `VERDICT:` 行） |
+
+`--stage-results` 传 JSON 文本：`'{"code":"PASS","artifact":"PASS","release":"UNKNOWN"}'`。
+
+> 2026-11-10 追加（共享记忆已满 300 条，转录于此落盘）：
+> - 改 `.agents/skills/*/SKILL.md` 后**必须** `node orchestrator/skill-manifest.mjs apply` 并同提交更新 `SKILL_MANIFEST.json`，否则 `orchestrator/test/skill-manifest.test.mjs` 红、verify-gate 记 1 败（T-352 实踩）。
+> - 本仓 `.git/hooks/` 仅有 `.sample`、`core.hooksPath` 无重定向（2026-11-10 实测）——pre-commit 钩子未安装，commit 不会自动过闸；改技能/改闸后靠人工跑 `node --test orchestrator/test/skill-manifest.test.mjs` 等补救。重装需 `node orchestrator/install-hooks.mjs`（全局影响，待用户拍板）。
 
 ### 示例（认领新任务）
 
@@ -121,6 +140,19 @@ CI 已在 `.github/workflows/ci.yml` 中追加 `ISSUE_REGISTRY JSON 校验` 步�
 - 在条目数较少时（当前 34 条）收益有限
 
 **结论：暂不拆分。** 以 `edit-issue.mjs` + `pre-commit-check.mjs` 消除手工编辑错误即可。若未来条目数显著增长（如超过 200 条）或并发编辑冲突频发，再重新评估 JSONL 拆分。
+
+## 6. T-352：台账分片（2026-11-10 落地）
+
+**真相源 = `registry.d/<id>.json`（每条一文件）；`ISSUE_REGISTRY.json` = 自动聚合快照（canonical、可字节复现，sha256 稳定）。禁手工编辑快照。**
+
+- 写路径：`edit-issue.mjs` 分片模式自动三文件落盘（分片 / 快照重聚合 / `_meta.json`），快照聚合 **git-aware**——只取 HEAD + 本次目标分片，绝不烘焙他端未提交分片（防夹带）。
+- OCC 基点 = 目标分片字节（他端写别的条目不再误伤本端）。
+- 提交边界：`pre-commit-check.mjs` 的 **LEDGER-SYNC** 会把「HEAD ∪ staged 分片」聚合与暂存快照核对，不一致则自动重写快照并重新暂存后再过闸（派生物确定性重放，非人工判断）——两端先后提交不再互相挡住。
+- 闸门：`mixed-diff-gate` 要求 staged 分片 ⊆ claim manifest、且 staged 快照 == git-aware 聚合（手改快照必拦）。
+- 合并冲突：只可能冲突在 `ISSUE_REGISTRY.json` / `_meta.json`（两派生文件）；`node orchestrator/tools/ledger-shard-snapshot.mjs --resolve --yes` 一键按磁盘分片重聚合收敛。
+- 紧急修复：`registry.d/` 损坏或丢失 → `node orchestrator/tools/ledger-shard-migrate.mjs --rebuild-from-snapshot`（从快照重建分片，先自动备份到 `registry.d.bak-<ts>/`）。**迁移已执行一次，勿再跑默认 migrate**。
+- 不变量：非目标分片写后字节零变更；快照 diff 只含目标条目 + `_meta` 哈希行；`_meta.json` 无时间戳（确定性）。
+- 新建分片自动：`edit-issue --auto-commit` 会 `git add registry.d/<id>.json ISSUE_REGISTRY.json registry.d/_meta.json`。
 
 ---
 
@@ -174,3 +206,17 @@ CI 已在 `.github/workflows/ci.yml` 中追加 `ISSUE_REGISTRY JSON 校验` 步�
 - 容量：每工作区 300 条 fact，单条 ≤2000 字符。满了先 `memory_consolidate` 清理近重复。
 - 内容不可臆造：`recall` 没结果就报没有，禁止凭记忆名猜内容。
 - 默认写 `target="fact"`。只有用户明确要求「每次会话自动注入」才写 profile，且 profile 只有 8 条额度——**profile 只有 Harness 能写**，OpenCode/Cline 没这个工具。
+
+## 台账写入事故补丁（2026-11-08 T-132 误翻复盘）
+
+台账是**单文件巨大 JSON、全文件读-改-写**，写者旧快照会把整文件覆盖回旧值——任何条目的 status 都可能被"连带翻回"（已发生的：7aa38760、5144a85 把 T-132 从 done 翻成 in_progress；11-05 f4028e21 手修、11-08 5144a85 再翻坏）。
+
+硬纪律（四条，不新增闸门——2026-11-04 用户裁定）：
+
+1. 任何台账写入**前后都对全文件做 `git diff`**；禁止只核对自己的 id、禁止用旧快照全量重写。
+2. 唯一写入入口 `orchestrator/edit-issue.mjs`（内置 attested 写闸 + TOCTOU 哈希校验）；自己动手整文件重写 = 误翻制造机。
+3. 发现 `done→非done` 回退：先归因（事故连带 / 11-04「清闸降级欠账」/ 未吸收单），禁止盖毯式翻回 done；欠账诚实终点是 `blocked`（写明原因），不是 `in_progress` 装作在办。
+4. 提交后做 **blob 级 status 对账**：`git show <sha>:ISSUE_REGISTRY.json` 解析每个 id 的 status 与上一提交逐条对比；`orchestrator/shell/titan-shell.mjs verify-change` 只能验语法/损坏词，验不出语义漂移。
+
+T-132 案复现要点：done_at 从未为空（2026-10-21T01:04:02+08:00），description 早已载明"视为被后续任务吸收"；被两笔无关提交连带翻回两次。
+下一次先查 done_at/description，再查 status 字段——别只看字段。

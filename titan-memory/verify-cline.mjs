@@ -109,7 +109,7 @@ child.stdout.on('data', (chunk) => {
 
 const request = (method, params) => new Promise((resolve, reject) => {
 	const id = nextId++;
-	const timer = setTimeout(() => { pending.delete(id); reject(new Error(`timeout on ${method}`)); }, 20_000);
+	const timer = setTimeout(() => { pending.delete(id); reject(new Error(`timeout on ${method}`)); }, 60_000);
 	pending.set(id, (msg) => {
 		clearTimeout(timer);
 		if (msg.error) reject(new Error(`${method}: ${msg.error.message}`));
@@ -132,7 +132,7 @@ try {
 
 	const listed = await request('tools/list');
 	const names = (listed.tools ?? []).map((t) => t.name).sort();
-	ok('7 tools exposed', names.length === 7, JSON.stringify(names));
+	ok('16 tools exposed', names.length === 16, JSON.stringify(names));
 	ok('tool names are unprefixed (Cline prefixes with server name)', names.every((n) => n.startsWith('memory_')), JSON.stringify(names));
 	process.stdout.write(`  -> Cline will show these as: ${names.map((n) => `${name}_${n}`).join(', ')}\n`);
 

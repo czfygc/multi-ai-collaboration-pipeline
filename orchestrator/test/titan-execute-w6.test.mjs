@@ -10,6 +10,11 @@
 //   D. 首答无 PROOF → 重试后二次强证明 → PASS exit 0（T-59 RETRY 缺口补丁锁定）
 //   E.（T-168）挂死类：假执行器静默挂起 → 进程自己退出 + 结果落盘 + 检查点指明挂在哪一步（零额度、秒级）
 //
+// T-276 教训：**别用全局 env 旋钮给单个档案造超时**。runExec 曾默认注入 TITAN_EXEC_TIMEOUT_MS=600，
+// 而 titan-execute.mjs:267 的 `TIMEOUT_OVERRIDE_MS || p.timeoutMs` 让它覆盖全部执行器（含降档后作答的那个）；
+// 本机 4 核满载下 node 冷启动最慢 2.9s → 应答被杀 → A/C/D 假红（6 次全量 verify-gate 里 4 次因此 FAIL）。
+// 现在：超时写在被测档案的 timeoutMs 上，env 覆盖只留给 E/F（那里旋钮本身是被测对象）。
+//
 // 注意：E 组必须与 A~D **同文件**——node --test 按**文件**并行跑，跨文件会同时写
 // test-projects/landmine-001/config/executor-profiles.json（沙箱共享）→ 互相覆盖 → 假失败。
 // 同文件内串行，无此冲突。
@@ -28,7 +33,17 @@ const CFG = join(LAND, 'config', 'executor-profiles.json');
 // 发布树不打包 241MB 沙箱仓（test-projects/landmine-001 本地 git 测试仓）：
 // 沙箱缺失时整套 e2e 自动 skip，gate 仍绿；repo 内沙箱在则 4/4 照跑。
 const SANDBOX_OK = existsSync(CFG);
-const origCfg = SANDBOX_OK ? readFileSync(CFG, 'utf8') : '';
+// T-271：原件以 git HEAD 为准，不信任工作区当前内容。
+// 教训——上一轮测试被中断时，它的 fixture（test-slow 档）会留在工作区；若把「当前内容」
+// 当原件，after() 就会把 fixture 当原件永久写回，于是每次跑完沙箱都是脏的（真踩过）。
+const committedCfg = (() => {
+  const r = spawnSync('git', ['show', 'HEAD:config/executor-profiles.json'], { cwd: LAND, encoding: 'utf8' });
+  let text = r.status === 0 && r.stdout ? r.stdout : '';
+  // 沙箱子仓 core.autocrlf=true，工作区需 CRLF；否则内容相同也会被 git 判为脏。
+  if (text && /\r\n/.test(text) === false) text = text.replace(/\n/g, '\r\n');
+  return text;
+})();
+const origCfg = SANDBOX_OK ? (committedCfg || readFileSync(CFG, 'utf8')) : '';
 const SKIP = SANDBOX_OK ? false : 'sandbox test-projects/landmine-001 not bundled (241MB, local-only)';
 
 const RSA = () => Math.random().toString(16).slice(2, 10);
@@ -55,12 +70,19 @@ function runExec(id, executor, env = {}) {
     cwd: LAND,
     encoding: 'utf8',
     timeout: 120000,
-    env: { ...process.env, D_TITAN_ROOT: LAND, TITAN_EXEC_TIMEOUT_MS: '600', TITAN_EXEC_BACKOFF_MS: '120', ...env },
+    // T-276：超时只由**被测档案自己的 timeoutMs** 制造（A/B 的 test-slow 写 timeoutMs:600）。
+    // 曾用全局 TITAN_EXEC_TIMEOUT_MS=600 模拟超时 —— 但 titan-execute.mjs:267 `TIMEOUT_OVERRIDE_MS || p.timeoutMs`
+    // 会把它套到**每一个**执行器上，包括降档后本该作答的 kilo（already.mjs）：本机 4 核满载时 node 冷启动
+    // p50≈1.8s / max≈2.9s（archive/evidence/T-276/），600ms 预算被击穿 → 应答被杀 → 假 BLOCKED（A/C/D 随机红）。
+    env: { ...process.env, D_TITAN_ROOT: LAND, TITAN_EXEC_BACKOFF_MS: '120', ...env },
   });
 }
 
 before(() => {
   if (!SANDBOX_OK) return;
+  // T-271：先从 git HEAD 恢复一次原件，抵消上一次被中断的测试留下的 fixture 残留。
+  // 这样即使工作区是脏的，本测试的起点也一定是提交版的四档配置。
+  if (origCfg) writeFileSync(CFG, origCfg, 'utf8');
   // 沙箱 fixture 脚本（slow = 只挂起不输出；already = 输出 AR+PROOF；noproof = AR 无 PROOF；
   // proofretry = 有状态：首答 AR 无 PROOF、二次答 AR+PROOF，T-59）
   writeFileSync(join(LAND, 'slow.mjs'), 'setTimeout(()=>process.exit(0), 20000);\n', 'utf8');
@@ -98,7 +120,7 @@ test('A. 超时→退避→降档→AR+PROOF 强证明真 fixture → PASS exit 
   writeFixtureProfile(
     {
       name: 'test-slow',
-      profile: { cmd: [process.execPath, 'slow.mjs'], modelFlag: '--model', defaultModel: 'x', extraArgs: [], env: {}, cwd: '.', timeoutMs: 600000 },
+      profile: { cmd: [process.execPath, 'slow.mjs'], modelFlag: '--model', defaultModel: 'x', extraArgs: [], env: {}, cwd: '.', timeoutMs: 600 /* T-276: 超时由本档案制造 */ },
     },
     {
       name: 'kilo',
@@ -120,7 +142,7 @@ test('B. 全链超时耗尽 → BLOCKED 记账 exit 3', { skip: SKIP }, () => {
   setupDispatch(id);
   writeFixtureProfile({
     name: 'test-slow',
-    profile: { cmd: [process.execPath, 'slow.mjs'], modelFlag: '--model', defaultModel: 'x', extraArgs: [], env: {}, cwd: '.', timeoutMs: 600000 },
+    profile: { cmd: [process.execPath, 'slow.mjs'], modelFlag: '--model', defaultModel: 'x', extraArgs: [], env: {}, cwd: '.', timeoutMs: 600 /* T-276: 超时由本档案制造 */ },
   });
   const r = runExec(id, 'test-slow');
   assert.equal(r.status, 3, '应 BLOCKED exit 3\n' + (r.stdout || '') + (r.stderr || ''));

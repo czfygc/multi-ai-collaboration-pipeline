@@ -2,6 +2,8 @@
 # titan_secrets.env MUST remain outside Git (execution order §15).
 **/titan_secrets.env
 titan_secrets.env
+**/titan_secrets.env.bak*
+titan_secrets.env.bak*
 %USERPROFILE%/titan/titan_secrets.env
 
 # 恢复码 / 二因素恢复凭据 —— 属密钥级，永不入库（2026-10-22 用户开了 GitHub 2FA 后落盘）
@@ -117,3 +119,9 @@ test-projects/landmine-001/
 
 # 未展开环境变量 %SystemDrive% 产生的 Windows 缓存垃圾（T-249 会话清理 2026-10-31）
 %SystemDrive%/
+
+# T-271 资产索引：派生文件，node orchestrator/asset-index.mjs build 可随时重建（228ms）。
+# 不入库避免每改一条台账就产生 247 KB 的提交噪声。
+orchestrator/config/asset-index.json
+orchestrator/state/
+dispatch-history.log

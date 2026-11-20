@@ -176,9 +176,9 @@ const localOnly = forceLocalOnly(scanIsMulti, args.includes('--local-only'));
         const urlRe = rv.url_match ? new RegExp(rv.url_match) : null;
         const page = urlRe ? list.find((x) => x.type === 'page' && urlRe.test(x.url)) : null;
         if (!page) return { source: rv.name, replyText: '', error: 'tab missing: ' + (rv.url_match || '(no url_match)') };
-        // T-122 步骤2.3：附件通道（用户指令：网页 4 席完整文件走附件 + 简短描述 prompt，不要频繁测试）。
-        // 重试：抛错 / UPLOAD_FAILED 可重试（共 3 次，fresh-chat 每次开新会话）；
-        // response-timeout / 空回复不重试（上轮已发出，重发只会造成重复气泡）。
+        // T-122 2.3: 重试策略（原注释编码损坏不可读；仅 UPLOAD_FAILED/配额受限类明确失败可重试，fresh-chat 每次开新会话）
+        // —— 以上为按损坏字节推断的复原，细则以 git 历史与 T-122 工单为准
+
         const attempt = async () => runTabUpload(cdp, page, rv, scanFilePath, webPrompt,
           scanRawDir, scanShotDir, { regenGate: webRegenGate, maxRegen: 1 });
         let log = null;
@@ -301,7 +301,7 @@ const localOnly = forceLocalOnly(scanIsMulti, args.includes('--local-only'));
           console.log('[SCAN] auto-fix succeeded');
           await fsPromises.writeFile(join(scanOutDir, 'execute-result.json'), JSON.stringify({
             success: true,
-            exitCode: r.status
+            exitCode: r.exitCode ?? r.status ?? null
           }, null, 2));
           process.exit(0);
       }

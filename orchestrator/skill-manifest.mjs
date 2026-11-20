@@ -6,6 +6,10 @@
 //   node orchestrator/skill-manifest.mjs apply   [--expect-sha256 <hex>] [--json]
 //                                                               落盘（锁 + CAS；并发写冲突显式失败）
 //   node orchestrator/skill-manifest.mjs verify  [--json]                 校验 manifest 与磁盘一致
+//   node orchestrator/skill-manifest.mjs registry [--write] [--json]       生成/落盘 registry.json
+//   node orchestrator/skill-manifest.mjs categories [--write] [--json]     生成/落盘 categories.json
+//   node orchestrator/skill-manifest.mjs verify-registry [--json]          校验 registry.json
+//   node orchestrator/skill-manifest.mjs verify-categories [--json]        校验 categories.json
 // 退出码: 0=成功, 1=失败/冲突/不一致, 2=用法错误
 //
 // 红线：只读技能目录；不改目录式发现方式；并发写冲突显式失败不静默覆盖。
@@ -16,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import {
   buildManifest, compareManifest, readManifest, applyManifest, verifyManifest,
   DEFAULT_SKILLS_ROOT, DEFAULT_MANIFEST_PATH,
+  buildRegistry, buildCategories, applyRegistry, applyCategories, verifyRegistry, verifyCategories,
 } from './lib/skill-manifest.mjs';
 import { sha256OfText } from './lib/lock.mjs';
 
@@ -31,13 +36,17 @@ const asJson = argv.includes('--json');
 const REPO_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const skillsRoot = resolve(flagValue('--skills-root') || DEFAULT_SKILLS_ROOT);
 const manifestPath = resolve(flagValue('--manifest') || DEFAULT_MANIFEST_PATH);
+const registryPath = resolve(flagValue('--registry') || DEFAULT_SKILLS_ROOT + '/registry.json');
+const categoriesPath = resolve(flagValue('--categories') || DEFAULT_SKILLS_ROOT + '/categories.json');
 
 if (!cmd || argv.includes('--help') || argv.includes('-h')) {
   console.log([
-    '用法: node orchestrator/skill-manifest.mjs <status|build|apply|verify> [options]',
+    '用法: node orchestrator/skill-manifest.mjs <status|build|apply|verify|registry|categories|verify-registry|verify-categories> [options]',
     '  --skills-root <dir>   技能目录（默认 .agents/skills）',
     '  --manifest <file>     manifest 路径（默认 .agents/skills/SKILL_MANIFEST.json）',
-    '  --write               build 时直接落盘（等价 apply）',
+    '  --registry <file>     registry.json 路径（默认 .agents/skills/registry.json）',
+    '  --categories <file>   categories.json 路径（默认 .agents/skills/categories.json）',
+    '  --write               build/registry/categories 时直接落盘',
     '  --expect-sha256 <hex> apply 时的 CAS 期望哈希（不符=并发冲突，拒写）',
     '  --json                输出 JSON',
     '退出码: 0=成功 1=失败/冲突/不一致 2=用法错误',
@@ -101,5 +110,61 @@ if (cmd === 'verify') {
   process.exit(r.ok ? 0 : 1);
 }
 
-console.error('未知命令: ' + cmd + '（可用: status|build|apply|verify）');
+if (cmd === 'registry') {
+  const registry = buildRegistry({ skillsRoot });
+  if (argv.includes('--write')) {
+    const r = applyRegistry({ registryPath, skillsRoot });
+    if (!r.ok) { console.error('[SKILL-MANIFEST] registry 写入失败: ' + r.detail); process.exit(1); }
+    console.log('[SKILL-MANIFEST] registry.json 已写入 ' + r.path + '（' + registry.skills.length + ' 个技能）');
+    process.exit(0);
+  }
+  if (asJson) console.log(JSON.stringify(registry, null, 2));
+  else {
+    console.log('[SKILL-MANIFEST] registry 预演：' + registry.skills.length + ' 个技能');
+    for (const s of registry.skills) {
+      console.log('  ' + s.name + ' [' + s.category + '] triggers=' + s.triggers.join(',') + ' alwaysAttach=' + s.alwaysAttach);
+    }
+  }
+  process.exit(0);
+}
+
+if (cmd === 'categories') {
+  const categories = buildCategories({ skillsRoot });
+  if (argv.includes('--write')) {
+    const r = applyCategories({ categoriesPath, skillsRoot });
+    if (!r.ok) { console.error('[SKILL-MANIFEST] categories 写入失败: ' + r.detail); process.exit(1); }
+    console.log('[SKILL-MANIFEST] categories.json 已写入 ' + r.path + '（' + Object.keys(categories.categories).length + ' 个分类）');
+    process.exit(0);
+  }
+  if (asJson) console.log(JSON.stringify(categories, null, 2));
+  else {
+    console.log('[SKILL-MANIFEST] categories 预演：' + Object.keys(categories.categories).length + ' 个分类');
+    for (const [cat, data] of Object.entries(categories.categories)) {
+      console.log('  ' + cat + ' (' + data.label + '): ' + data.skills.length + ' 技能');
+    }
+  }
+  process.exit(0);
+}
+
+if (cmd === 'verify-registry') {
+  const r = verifyRegistry({ registryPath, skillsRoot });
+  if (asJson) console.log(JSON.stringify(r, null, 2));
+  else {
+    if (r.ok) console.log('[SKILL-MANIFEST] registry.json 与磁盘一致（' + registryPath + '）');
+    else for (const i of r.issues) console.error('[SKILL-MANIFEST] ' + i);
+  }
+  process.exit(r.ok ? 0 : 1);
+}
+
+if (cmd === 'verify-categories') {
+  const r = verifyCategories({ categoriesPath, skillsRoot });
+  if (asJson) console.log(JSON.stringify(r, null, 2));
+  else {
+    if (r.ok) console.log('[SKILL-MANIFEST] categories.json 与磁盘一致（' + categoriesPath + '）');
+    else for (const i of r.issues) console.error('[SKILL-MANIFEST] ' + i);
+  }
+  process.exit(r.ok ? 0 : 1);
+}
+
+console.error('未知命令: ' + cmd + '（可用: status|build|apply|verify|registry|categories|verify-registry|verify-categories）');
 process.exit(2);

@@ -50,17 +50,57 @@ function frameOffsets(buf) {
 	return offsets;
 }
 
-/** Decode every zstd frame in the file. Frames that fail or do not start a
- *  JSON value are dropped (magic can appear inside compressed payloads). */
+/** Decode a session file's zstd frames. Node >= 22 decodes concatenated
+ *  frames in one call; the per-frame fallback only runs for older runtimes or
+ *  a corrupt tail. maxOutputLength guards a bogus frame header. */
 function decodeFrames(buf) {
+	try {
+		const text = zlib.zstdDecompressSync(buf, { maxOutputLength: 256 * 1024 * 1024 }).toString('utf8');
+		if (text.length > 0) return [text];
+	} catch { /* fall through to frame walking */ }
 	const texts = [];
 	for (const offset of frameOffsets(buf)) {
 		try {
-			const text = zlib.zstdDecompressSync(buf.subarray(offset)).toString('utf8');
+			const text = zlib.zstdDecompressSync(buf.subarray(offset), { maxOutputLength: 8 * 1024 * 1024 }).toString('utf8');
 			if (text.startsWith('{') || text.startsWith('[')) texts.push(text);
 		} catch { /* not a frame start */ }
 	}
 	return texts;
+}
+
+function textBlocks(content) {
+	if (!Array.isArray(content)) return [];
+	return content
+		.filter((block) => block !== null && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string')
+		.map((block) => block.text);
+}
+
+/** Decode one session file into ordered conversation messages. Only text blocks
+ *  are kept (tool calls/results are not memory candidates). */
+export function loadSession(file) {
+	let decoded;
+	try { decoded = decodeFrames(fs.readFileSync(file)); } catch { return null; }
+	if (decoded.length === 0) return null;
+	let header;
+	try { header = JSON.parse(decoded[0].split('\n')[0]); } catch { header = {}; }
+	const sessionId = header.id ?? path.basename(path.dirname(file));
+	const messages = [];
+	for (const frame of decoded) {
+		for (const line of frame.split('\n')) {
+			if (!line.startsWith('{')) continue;
+			let event;
+			try { event = JSON.parse(line); } catch { continue; }
+			let role;
+			let blocks;
+			if (event.type === 'user/message') { role = 'user'; blocks = textBlocks(event.data?.content); }
+			else if (event.type === 'assistant/message') { role = 'assistant'; blocks = textBlocks(event.data?.message?.content); }
+			else continue;
+			const text = blocks.join('\n').trim();
+			if (text.length === 0) continue;
+			messages.push({ seq: event.seq, time: event.time, role, text });
+		}
+	}
+	return { sessionId, file, messages };
 }
 
 /** Layout is two levels deep: <root>/<workspace>/<session-id>/<file>. */

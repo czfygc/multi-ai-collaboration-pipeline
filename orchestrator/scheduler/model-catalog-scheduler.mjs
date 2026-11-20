@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { runCatalogSync } from '../lib/catalog-runner.mjs';
 import { runChainHeadsSync } from '../lib/chain-heads.mjs';
 import { loadSecretsEnv, sendTelegram, formatCatalogChange } from '../lib/alert.mjs';
+import { appendChainSyncToMessage } from '../lib/catalog-alert-format.mjs';
 import { execSync } from 'node:child_process';
 
 const argv = process.argv.slice(2);
@@ -27,7 +28,14 @@ function flagValue(name) {
 const REPO_ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const once = argv.includes('--once');
 const probe = argv.includes('--probe');
-const intervalHours = Number(flagValue('--interval-hours') || 6);
+const _rawInterval = flagValue('--interval-hours');
+const _parsedInterval = Number(_rawInterval || 6);
+// P1-07: 非法 --interval-hours 必须显式拒绝（此前 NaN → Math.max(1,NaN)=NaN → 1ms 循环洪水执行 apply）
+if (_rawInterval !== null && (!Number.isFinite(_parsedInterval) || _parsedInterval <= 0)) {
+  console.error('[SCHED] 非法 --interval-hours: ' + JSON.stringify(_rawInterval) + '（须为 >0 的有限数）');
+  process.exit(2);
+}
+const intervalHours = _parsedInterval;
 const gatewayUrl = flagValue('--gateway') || process.env.FREELLMAPI_BASE_URL || 'http://127.0.0.1:3001';
 const statePath = resolve(flagValue('--state') || join(REPO_ROOT, 'orchestrator', 'run-events', 'supervisor', 'model-catalog-scheduler.json'));
 const lastReportPath = resolve(flagValue('--last-report') || join(REPO_ROOT, 'orchestrator', 'run-events', 'supervisor', 'model-catalog-last-report.json'));
@@ -74,23 +82,9 @@ async function tick(n) {
   } catch (e) {
     console.log('[SCHED] 链同步失败(不致命): ' + String((e && e.message) || e).slice(0, 200));
   }
-  const msg = formatCatalogChange(report);
-  // T-202: 链变化追加进告警（变化留痕=覆盖文件 git diff + 审计 jsonl + 此告警）
-  if (chainReport && chainReport.changed) {
-    const lines = [];
-    const k = chainReport.kilo || {};
-    if ((k.added || []).length) lines.push('kilo 新增: ' + k.added.join(', '));
-    if ((k.disabled || []).length) lines.push('kilo 禁用: ' + k.disabled.join(', '));
-    if ((k.ctxUpdates || []).length) lines.push('kilo 刷新: ' + k.ctxUpdates.map((u) => u.id).join(', '));
-    const o = chainReport.ofm || {};
-    if (o.frozen) lines.push('ofm: 链首冻结（上游不健康）');
-    if (!o.frozen && (o.dropped || []).length) lines.push('ofm 出链首: ' + o.dropped.join(', '));
-    if (!o.frozen && (o.addedDisabled || []).length) lines.push('ofm 新模型(待人工钉ctx): ' + o.addedDisabled.join(', '));
-    const a = chainReport.anly || {};
-    if ((a.disabled || []).length) lines.push('anly 禁用: ' + a.disabled.join(', '));
-    if ((a.addedDisabled || []).length) lines.push('anly 新模型(禁用行): ' + a.addedDisabled.join(', '));
-    if (lines.length) msg = (msg ? msg + '\n' : '') + '[链同步]\n' + lines.join('\n');
-  }
+  let msg = formatCatalogChange(report);
+  // T-202/T-372：链变化追加进告警（拼接逻辑抽离为纯函数并入单测；变化留痕=覆盖文件 git diff + 审计 jsonl + 此告警）
+  msg = appendChainSyncToMessage(msg, chainReport);
   let alerted = null;
   if (msg) {
     alerted = await sendTelegram(msg);
@@ -111,7 +105,13 @@ async function tick(n) {
 let n = 0;
 for (;;) {
   n += 1;
-  await tick(n);
+  try {
+    await tick(n);
+  } catch (e) {
+    // P1-07 伴生: 单次 tick 未捕获异常不得杀死整个调度器
+    console.error('[SCHED] tick ' + n + ' 未捕获异常（继续调度）: ' + String((e && e.message) || e).slice(0, 300));
+    try { writeJson(statePath, { updated_at: new Date().toISOString(), last_error: String((e && e.message) || e).slice(0, 300), ticks: n }); } catch {}
+  }
   if (once) break;
   const sleepMs = Math.max(1, intervalHours) * 3600 * 1000;
   console.log('[SCHED] 下轮在 ' + intervalHours + ' 小时后（' + n + '）');

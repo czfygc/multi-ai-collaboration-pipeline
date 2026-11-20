@@ -24,6 +24,13 @@ export const EVIDENCE_LEVEL_LABELS = Object.freeze({
   local_report: '本地执行端自报（作者自跑，未被第二方复核）',
   unverified: '未验证',
 });
+// T-255：dol-scanner 内部三档证据分级 → 台账 evidence_level 三值映射（唯一正表，
+// 三处共用：dol 扫描 / 台账 / 技能，勿另造第二套分级词汇）。
+export const DOL_GRADE_TO_EVIDENCE_LEVEL = Object.freeze({
+  VERIFIED: 'firsthand',
+  REFERENCED: 'local_report',
+  UNVERIFIED: 'unverified',
+});
 export const STAGES = Object.freeze(['code', 'artifact', 'release']);
 export const STAGE_LABELS = Object.freeze({
   code: '代码段（代码 → 审查 → 修复 → 验证）',
@@ -285,7 +292,7 @@ export function summarizeEntry(entry) {
 }
 
 export default {
-  EVIDENCE_LEVELS, EVIDENCE_LEVEL_LABELS, STAGES, STAGE_LABELS, STAGE_RESULTS,
+  EVIDENCE_LEVELS, EVIDENCE_LEVEL_LABELS, DOL_GRADE_TO_EVIDENCE_LEVEL, STAGES, STAGE_LABELS, STAGE_RESULTS,
   TASK_CARD_FIELDS, MAX_FIX_ROUNDS,
   normalizeEvidenceLevel, normalizeStage, normalizeStageResults, normalizeTaskCard, normalizeFixRounds,
   evaluateEntry, renderTaskCardYaml, parseTaskCardYaml, summarizeEntry,

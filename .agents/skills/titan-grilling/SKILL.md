@@ -1,6 +1,6 @@
 ---
 name: titan-grilling
-description: "【协作流程】方案或需求有歧义时先盘问再动手：把整条设计树当前前沿一次性问完，每问附推荐答案，等回答后重新计算，循环到没有分支被默认。触发词：盘问我 / 格栅 / 把需求问清楚 / grill me"
+description: "【协作流程】需求有歧义时先盘问：整条设计树当前前沿一次问完，每问附推荐答案。触发词：盘问我 / 格栅 / 把需求问清楚 / grill me"
 version: 1.1.0
 requires: none
 tests: "manual: 对一个模糊需求跑满一轮 design tree"

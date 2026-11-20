@@ -1,12 +1,12 @@
 ---
 name: diagram-design
-description: "【图表】生成架构图、流程图、时序图、状态机、ER/数据模型、泳道、热力图、看板等（HTML/SVG/PNG），支持 Mermaid/.drawio/.excalidraw 导入与配色规范"
+description: "【图表】画架构图/流程图/时序图/状态机/ER/泳道/看板（HTML/SVG/PNG）。触发词：画图 / 架构图 / 流程图 / 时序图 / 泳道图"
 license: MIT
 metadata:
   version: "2.6"
 version: 1.1.0
 requires: node, python
-tests: python .agents/skills/diagram-design/scripts/self_check.py --offline diagram.html
+tests: python .agents/skills/diagram-design/scripts/self_check.py --offline design-specs/diagrams/v2-architecture.html
 provenance: vendored:cathrynlavery/diagram-design#f2f4d49
 ---
 
@@ -157,7 +157,7 @@ These mark "AI slop" schematics of any type:
 | Dark mode + cyan/purple glow | Looks "technical" without design decisions |
 | JetBrains Mono as blanket "dev" font | Mono is for *technical* content — ports, commands, URLs. Names go in Geist sans. |
 | Identical boxes for every node | Erases hierarchy |
-| Legend floating inside the diagram area | Collides with nodes |
+| Legend floating inside the diagram area | Collides with nodes |  vaw-ok
 | Arrow labels with no masking rect | Bleeds through the line |
 | Vertical `writing-mode` text on arrows | Unreadable |
 | 3 equal-width summary cards as default | Generic grid — vary widths |
@@ -280,7 +280,7 @@ Run before producing any diagram.
 **Signal:**
 
 - [ ] Coral used on ≤2 elements? If more, which actually deserve focal status?
-- [ ] Legend covers every type used — and nothing extra?
+- [ ] Legend covers every type used — and nothing extra?  vaw-ok
 - [ ] Within the type's complexity budget (§7)?
 
 **Technical:**
@@ -296,7 +296,7 @@ Run before producing any diagram.
 - [ ] **§6 rule 5:** no transit behind a non-endpoint box, except the unavoidable case (dashed, label at the visible end)?
 - [ ] **§6 rule 6:** no label mask overlapping a node drawn after it? (From a repository checkout, run `python3 <repo-root>/scripts/verify-geometry.py <file>`.)
 - [ ] Every arrow label has an opaque `fill="#f5f5f5"` rect behind it?
-- [ ] Legend is a horizontal bottom strip, not floating?
+- [ ] Legend is a horizontal bottom strip, not floating?  vaw-ok
 - [ ] No vertical `writing-mode` text?
 - [ ] `viewBox` expanded for the legend strip (~60px)?
 - [ ] **`min-width` equals the viewBox width, and the SVG sits in a local `overflow-x: auto` wrapper? (Otherwise a phone scrolls the whole page — or an `overflow: hidden` ancestor clips the diagram with no scrollbar at all. See [output-spec.md](references/output-spec.md).)**

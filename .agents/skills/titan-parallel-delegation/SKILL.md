@@ -1,6 +1,6 @@
 ---
 name: titan-parallel-delegation
-description: "【协作流程】大任务分给 4 客户端并行协作：按文件所有权切分（路径不重叠）、委派者不碰 git（只交文件）、作者≠验证者、派单前先探活目标模型（配额是真瓶颈）、两个本地坑（后台进程被杀 / Cline 独立 data-dir 的 providers.json 会被重置）。触发词：并行 / 委派 / 分给别的客户端 / 派活 / 协作"
+description: "【协作流程】大任务切给 4 客户端并行：按文件所有权分区，派单前先探活模型。触发词：并行 / 委派 / 分给别的客户端 / 派活 / 协作"
 user-invocable: true
 version: 1.1.0
 requires: node, git
