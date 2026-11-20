@@ -3,8 +3,8 @@
   "generatedBy": "orchestrator/publish-sync.mjs",
   "sourceRepo": "D:/TITAN_ARCHAEOLOGY",
   "sourceCommit": "b79551b6e14396d45f10d3a555751725f433d50e",
-  "syncedAt": "2026-11-20T10:02:56.712Z",
-  "publishedFiles": 280,
-  "publishedFingerprint": "2aabb8941f12db3644f182f3b9e34a8509a3895505a347b0cebff9d91170251c",
-  "note": "本仓由本地工作区的发布树同步生成；来源提交见 sourceCommit；禁推清单见 publish-sync.mjs NEVER_PUBLISH。"
+  "syncedAt": "2026-11-20T14:38:57.156Z",
+  "publishedFiles": 263,
+  "publishedFingerprint": "faca08dd7430beaac36c23d9100d21058e8e7ecdf98ac9372e0b520b72298fe9",
+  "note": "本仓由本地工作区的发布树同步生成；来源提交见 sourceCommit；本次 prune 剔除 17 个本地已删除的旧技能文件（T-183/b21bf968）。"
 }
